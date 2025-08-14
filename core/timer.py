@@ -1,22 +1,19 @@
-import timer
-import threading
+from threading import Timer
 
 class Timer:
-    def __init__(self, durationinseconds):
-        self.durationinseconds = durationinseconds
-        self.timeremaining = durationinseconds
-        self.starttimer = None
-        self.timerrunning = None
-        self.timerthread = None
-        self.unblocktimer = None
-    
-    def unblock(self):
-        
+    def __init__(self, durationinseconds, unblocktimer):
+        self.duration = durationinseconds
+        self.unblocktimer = durationinseconds
+        self.timer = None
     
     def start(self):
-        print("timer is starting")
-        t = threading.Timer(30.0, self.unblock).start()
-
-"""
-if __name__ == "__main__":
-""" 
+        print("Timer running for {self.durationinseconds} seconds")
+        self.timer = Timer(self.durationinseconds, self.unblocktimer)
+        self.timer.start()
+        my_timer = 5
+        
+    
+    def abort(self):
+        if self.timer:
+            self.timer.cancel()
+            print("Timer cancelled")
