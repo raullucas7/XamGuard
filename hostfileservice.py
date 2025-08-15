@@ -1,4 +1,3 @@
-import os
 import time
 from datetime import datetime as DT
 import platform
@@ -20,3 +19,35 @@ elif (os_name == "Darwin"):
 # add linux option here
 
 
+TAGS = "# XAMGUARD"
+def block(websites):
+    with open(host_path, "r+") as f:
+        filetext = f.read()
+    
+    linestoadd = []
+    
+    for i in websites:
+        site = i.strip()
+        
+        if not site:
+            continue
+        
+        # exact ip and site 
+        if f"{ip} {site}" in filetext or f"{ip}\t{site}" in filetext:
+            print(f"{site} already blocked")
+        else:
+            linestoadd.append(f"{ip} {site} {TAGS}\n")
+            
+    if not linestoadd:
+        print("Nothing to add")
+        return
+    
+    with open(host_path, "w") as g:
+        g.write(linestoadd)
+    
+    print("blocked this stupid site")
+
+
+def unblock(websites):
+    # yes
+    return
