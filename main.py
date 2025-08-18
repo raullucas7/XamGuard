@@ -14,10 +14,21 @@ def sitelogic():
 def applogic():
     return
 
+def blocklogic():
+    return
+
 def unblocklogic():
     return
 
 def quitlogic():
+    return
+
+
+# HELPERS
+def inputcleaner():
+    return
+
+def confirminput():
     return
 
 
