@@ -46,7 +46,7 @@ def block(websites):
     with open(host_path, "w") as g:
         g.write(linestoadd)
     
-    print("blocked this stupid site")
+    print("blocked this site")
 
 
 def unblock(websites):
@@ -54,6 +54,6 @@ def unblock(websites):
     
     
     
-    print("blocked this stupid site")
+    print("blocked this site")
     
     return
