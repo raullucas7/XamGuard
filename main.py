@@ -3,13 +3,6 @@ from threading import Timer
 blocked_sites = []
 blocked_apps = []
 
-INPUT_HANDLING = {
-    "site" : sitelogic,
-    "app" : applogic,
-    "unblock" : unblocklogic,
-    "quit" : quitlogic
-}
-
 
 def sitelogic():
     sites = input("Enter websites to block (comma separated, e.g. youtube.com,facebook.com): ")
@@ -62,6 +55,14 @@ def unblocklogic():
 def quitlogic():
     print("Exiting XamGuard. Stay focused!")
     exit()
+
+
+INPUT_HANDLING = {
+    "site" : sitelogic,
+    "app" : applogic,
+    "unblock" : unblocklogic,
+    "quit" : quitlogic
+}
 
 
 # HELPERS
