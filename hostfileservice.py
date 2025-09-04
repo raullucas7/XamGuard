@@ -1,6 +1,8 @@
 import time
 from datetime import datetime as DT
 import platform
+TAGS = "# XAMGUARD"
+
 
 os_name = platform.system()
 print(f"The OS detected is: {os_name}")
@@ -19,7 +21,6 @@ elif (os_name == "Darwin"):
 # add linux option here
 
 
-TAGS = "# XAMGUARD"
 def block(websites):
     with open(host_path, "r+") as f:
         filetext = f.read()
@@ -50,4 +51,9 @@ def block(websites):
 
 def unblock(websites):
     # yes
+    
+    
+    
+    print("blocked this stupid site")
+    
     return
