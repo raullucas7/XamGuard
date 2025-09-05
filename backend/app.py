@@ -5,3 +5,8 @@ app = Flask(__name__)
 
 def home():
     return "Hello Xamguard"
+
+@app.route("/", methods=["POST"])
+
+def apiblock():
+    return
