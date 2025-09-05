@@ -1,4 +1,5 @@
 from threading import Timer
+from hostfileservice import block, unblock
 
 blocked_sites = []
 blocked_apps = []
@@ -9,6 +10,7 @@ def sitelogic():
     site_list = [site.strip() for site in sites.split(",") if site.strip()]
     blocked_sites.extend(site_list)
     print(f"Blocked sites: {blocked_sites}")
+    block(site_list)
 
 def applogic():
     apps = input("Enter app names to block (comma separated, e.g. chrome,spotify): ")
@@ -28,7 +30,8 @@ def unblocklogic():
         site = input("Enter site to unblock: ").strip()
         
         if site in blocked_sites:
-            blocked_sites.remove(site)
+            # blocked_sites.remove(site)
+            unblock([site])
             print(f"Unblocked {site}. Remaining blocked sites: {blocked_sites}")
         
         else:
@@ -43,7 +46,8 @@ def unblocklogic():
         app = input("Enter app to unblock: ").strip()
         
         if app in blocked_apps:
-            blocked_apps.remove(app)
+            # blocked_apps.remove(app)
+            unblock(app)
             print(f"Unblocked {app}. Remaining blocked apps: {blocked_apps}")
         
         else:
