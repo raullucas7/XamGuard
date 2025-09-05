@@ -52,4 +52,32 @@ def block(websites):
     print("Blocked the following sites:", websites)
 
 def unblock(websites):
-    return
+    with open(host_path, "r+") as f:
+        # remove the line where site is at, not entire file
+        lines = f.readlines()
+    
+        linestoremove = []
+        
+        # move read pointer from end to the start of line
+        f.seek(0)
+        
+        for line in lines:
+            for site in websites:
+                site = site.strip()
+                blockentry = f"{ip} {site} {TAGS}"
+                
+                # checker to prevent wrong lines from dying
+                mustremove = False
+                
+                if blockentry in line:
+                    mustremove = True
+                    linestoremove.append(site)
+                    break
+            
+            # write the line back / prevent deleting
+            if not mustremove:
+                f.write(lines)
+        
+        f.truncate()
+        
+    print("Unblocked the following sites:", linestoremove)
