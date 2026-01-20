@@ -76,7 +76,7 @@ def unblock(websites):
             
             # write the line back / prevent deleting
             if not mustremove:
-                f.write(lines)
+                f.write(line)
         
         f.truncate()
         
