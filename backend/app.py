@@ -1,7 +1,9 @@
 from flask import Flask, request, jsonify
+from flask_cors import CORS
 from components.hostfileservice import block, unblock
 
 app = Flask(__name__)
+CORS(app)
 blocked_sites = []
 @app.route("/")
 
@@ -27,7 +29,7 @@ def getblockedsites():
 
 # unblock the site lil bro
 @app.route("/api/unblock", methods=["POST"])
-def apiblock():
+def apiunblock():
     data = request.get_json()
     sites = data.get("sites", [])
     unblock(sites)
