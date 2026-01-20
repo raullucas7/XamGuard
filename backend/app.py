@@ -27,7 +27,7 @@ def apiblock():
 def getblockedsites():
     return jsonify({"blocked_sites": blocked_sites})
 
-# unblock the site lil bro
+# unblock the site
 @app.route("/api/unblock", methods=["POST"])
 def apiunblock():
     data = request.get_json()
