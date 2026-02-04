@@ -4,9 +4,13 @@ from hostfileservice import block, unblock
 blocked_sites = []
 blocked_apps = []
 
+"""
+    to run -> python app.py
+    install npm (npm install) and run (npm run dev)
+"""
 
 def sitelogic():
-    sites = input("Enter websites to block (comma separated, e.g. youtube.com,facebook.com): ")
+    sites = input("Enter websites to block (comma separated, e.g. youtube.com, facebook.com): ")
     site_list = [site.strip() for site in sites.split(",") if site.strip()]
     blocked_sites.extend(site_list)
     print(f"Blocked sites: {blocked_sites}")
@@ -79,17 +83,16 @@ def validateinput(prompt):
 
 def main():
     print("Welcome to XamGuard, rapture yourself from procrastination!")
+
     while True:
         optionchoice = input("Choose: site | app | unblock | quit: ")
         optionchoice = fixinput(optionchoice)
-        if optionchoice == "site":
-            sitelogic()
-        elif optionchoice == "app":
-            applogic()
-        elif optionchoice == "unblock":
-            unblocklogic()
-        elif optionchoice == "quit":
-            quitlogic()
+
+        if optionchoice == "site": sitelogic()
+        elif optionchoice == "app": applogic()
+        elif optionchoice == "unblock": unblocklogic()
+        elif optionchoice == "quit" or "q": quitlogic()
+        
         else:
             print("Invalid option. Please choose again.")
 
