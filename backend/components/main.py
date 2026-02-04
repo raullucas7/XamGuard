@@ -9,6 +9,26 @@ blocked_apps = []
     install npm (npm install) and run (npm run dev)
 """
 
+def displayinfo():
+    request = input("Do you want to see your blocked 'site's or 'app's? ").strip().lower()
+
+    if request == "no" or request == "n":
+        return
+
+    if request == "site":
+        if blocked_sites:
+            print(f"Blocked sites: {blocked_sites}")
+        else:
+            print("No sites are currently blocked.")
+    
+    elif request == "app":
+        if blocked_apps:
+            print(f"Blocked apps: {blocked_apps}")
+        else:
+            print("No apps are currently blocked.")
+    else:
+        print("Invalid choice.")
+
 def sitelogic():
     sites = input("Enter websites to block (comma separated, e.g. youtube.com, facebook.com): ")
     site_list = [site.strip() for site in sites.split(",") if site.strip()]
@@ -85,13 +105,14 @@ def main():
     print("Welcome to XamGuard, rapture yourself from procrastination!")
 
     while True:
-        optionchoice = input("Choose: site | app | unblock | quit: ")
+        optionchoice = input("Choose: site | app | unblock | view blacklist | quit: ")
         optionchoice = fixinput(optionchoice)
 
         if optionchoice == "site": sitelogic()
         elif optionchoice == "app": applogic()
         elif optionchoice == "unblock": unblocklogic()
-        elif optionchoice == "quit" or "q": quitlogic()
+        elif optionchoice == "view blacklist" or optionchoice == "view": displayinfo() 
+        elif optionchoice == "quit" or optionchoice == "q": quitlogic()
         
         else:
             print("Invalid option. Please choose again.")
