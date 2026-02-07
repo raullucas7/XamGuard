@@ -4,13 +4,13 @@ import './index.css'
 import App from './App.jsx'
 
 // est the hunter for root
-const element = document.getElementById('root');
+const rootElement = document.getElementById('root');
 
 // est the rock
 const root = createRoot(rootElement);
 
 // est renderer
-renderer(document.getElementById('root')).render(
+root.render(
     <StrictMode>
         <App />
     </StrictMode>,
