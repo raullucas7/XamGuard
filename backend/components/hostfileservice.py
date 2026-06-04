@@ -114,33 +114,40 @@ def block(websites):
 
 def unblock(websites):
     domains = set(domainexpansion(websites))
-
-    with open(HOST_PATH, "r+") as f:
-        # remove the line where site is at, not entire file
-        lines = f.readlines()
+    if not domains:
+        print("Nothing to unblock.")
+        return
     
-        linestoremove = []
+    lines = f.readlines()
+    kept = []
+    removedwebsites = []
+
+    for line in lines:
+        strippedlines = line.strip()
+        parts = strippedlines.split()
+        kept = (
+            strippedlines.split()
+            and len(parts) >= 2
+            and parts[0] == ip
+            and parts[1].lower() in domains
+        )
+
+        if kept:
+            removedwebsites.append(parts[1].lower())
+        else:
+            kept.append(line)
         
-        # move read pointer from end to the start of line
-        f.seek(0)
-        
-        for line in lines:
-            for site in websites:
-                site = site.strip()
-                blockentry = f"{ip} {site} {TAGS}"
-                
-                # checker to prevent wrong lines from dying
-                mustremove = False
-                
-                if blockentry in line:
-                    mustremove = True
-                    linestoremove.append(site)
-                    break
-            
-            # write the line back / prevent deleting
-            if not mustremove:
-                f.write(line)
-        
-        f.truncate()
-        
-    print("Unblocked the following sites:", linestoremove)
+    if not removedwebsites:
+        print("None of these sites are blocked")
+        return
+    
+    try:
+        with open(HOST_PATH, "w", encoding="utf-8") as f:
+            f.writelines(kept)
+    except PermissionError:
+        raise PermissionError(
+            "Can't write the hosts file, Run Xamguard as an ADMIN."
+        )
+
+    dnsflush()
+    print("Unblocked: ", ", ".join(removedwebsites))
