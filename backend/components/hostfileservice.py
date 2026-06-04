@@ -1,32 +1,60 @@
-import time
+# hostfileservice.py
+
+"""
+Block/unblock websites by editing the system hosts file (Windows-first)
+"""
+
 from datetime import datetime as DT
 import platform
+import subprocess
+import os
 TAGS = "# XAMGUARD"
-
-
-os_name = platform.system()
-print(f"The OS detected is: {os_name}")
-
-host_temp = "hosts.txt"
 ip = "127.0.0.1"
 
-if (os_name == "Windows"):
-    host_path = r"C:\Windows\System32\drivers\etc\hosts"
-    print("Hello Windows user!")
-    
-elif (os_name == "Darwin"):
-    host_path = r"/etc/hosts"
-    print("Hello Mac user!")
 
-elif (os_name == "Linux"):
-    host_path = r"/etc/hosts"
-    print("Hello Linux user!")
+def gethostpath():
+    system = platform.system()
+    
+    if system == "Windows":
+        return r"C:\Windows\System32\drivers\etc\hosts"
+    elif system in ("Darwin", "Linux"):
+        return "/etc/hosts"
+    else:
+        raise NotImplementedError(f"Unsupported OS: {system}")
+
+hostpath = os.environ.get("XAMGUARD_HOSTS_PATH") or gethostpath()
+
+def domainexpansion(domains):
+    result = []
+    seendomains = set()
+
+    for raw in domains:
+        site = raw.strip().lower()
+
+        if not site:
+            continue
+
+        variant = [site]
+
+        if site.startwith("www."):
+            variant.append(site[4:])
+        else:
+            variant.append(f"www.{site}")
+        for var in variant:
+            if var not in seendomains:
+                seendomains.add(var)
+                result.append(var)
+    
+    return result
+
 
 def block(websites):
-    with open(host_path, "r+") as f:
-        filetext = f.read()
-    
+    with open(hostpath, "r+") as f:
         linestoadd = []
+        filetext = f.read()
+        
+        if filetext and not filetext.endswith("\n"):
+            linestoadd.insert(0, "\n")
         
         for i in websites:
             site = i.strip()
@@ -39,7 +67,7 @@ def block(websites):
                 print(f"{site} already blocked")
             else:
                 linestoadd.append(f"{ip} {site} {TAGS}\n")
-                
+
         if not linestoadd:
             print("Nothing to add")
             return
@@ -50,6 +78,7 @@ def block(websites):
         for line in linestoadd:
             f.write(line)
     print("Blocked the following sites:", websites)
+
 
 def unblock(websites):
     with open(host_path, "r+") as f:
