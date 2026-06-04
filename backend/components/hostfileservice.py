@@ -22,7 +22,7 @@ def gethostpath():
     else:
         raise NotImplementedError(f"Unsupported OS: {system}")
 
-hostpath = os.environ.get("XAMGUARD_HOSTS_PATH") or gethostpath()
+HOST_PATH = os.environ.get("XAMGUARD_HOSTS_PATH") or gethostpath()
 
 def domainexpansion(domains):
     result = []
@@ -47,41 +47,75 @@ def domainexpansion(domains):
     
     return result
 
+def readlines():
+    try:
+        with open(HOST_PATH, "r", encoding="utf=8") as fix:
+            return fix.readlines()
+    except PermissionError:
+        raise PermissionError(
+            "Can't read the hosts file. Run XamGuards as administrator/root."
+        )
+
+def alreadyblocked(lines):
+    blocked = set()
+
+    for line in lines:
+        strippedlines = line.strip()
+
+        if not strippedlines.endswith(TAGS):
+            continue
+        parts = strippedlines.split()
+
+        if len(parts) >= 2 and parts[0] == ip:
+            blocked.add(parts[1].lower())
+    return blocked
+
+def dnsflush():
+    sys = platform.system()
+
+    try:
+        if sys == "Windows":
+            subprocess.run(["ipconfig", "/flushdns"], check=True, get_output=True)
+        # elif sys == "Darwin" (MAC)
+
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        pass
 
 def block(websites):
-    with open(hostpath, "r+") as f:
-        linestoadd = []
-        filetext = f.read()
-        
-        if filetext and not filetext.endswith("\n"):
-            linestoadd.insert(0, "\n")
-        
-        for i in websites:
-            site = i.strip()
-            
-            if not site:
-                continue
-            
-            # exact ip and site 
-            if f"{ip} {site}" in filetext or f"{ip}\t{site}" in filetext:
-                print(f"{site} already blocked")
-            else:
-                linestoadd.append(f"{ip} {site} {TAGS}\n")
+    domains = domainexpansion(websites)
+    if not domains:
+        print("No websites to block.")
+        return
+    lines = readlines()
+    alreadyread = alreadyblocked(lines)
+    addothers = [d for d in domains if d not in alreadyread]
 
-        if not linestoadd:
-            print("Nothing to add")
-            return
-        
-        # stop writing over the sites; 0 = start, 2 = end
-        f.seek(0, 2)
-        
-        for line in linestoadd:
-            f.write(line)
-    print("Blocked the following sites:", websites)
+    if not addothers:
+        print("All requested sites are already blocked")
+        return
+    
+    needsnewline = bool(lines) and not lines[-1].endswith("\n")
+
+    try:
+        with open(HOST_PATH, "a", encoding="utf-8") as f:
+            if needsnewline:
+                f.write("\n")
+            for d in addothers:
+                f.write(f"{ip} {d} {TAGS}\n")
+    except PermissionError:
+        raise PermissionError(
+            "Can't write the hosts file. Run XamGuard as administrator/root."
+        )
+ 
+    dnsflush()
+    print("Blocked:", ", ".join(addothers))
+
 
 
 def unblock(websites):
-    with open(host_path, "r+") as f:
+    domains = set(domainexpansion(websites))
+
+    with open(HOST_PATH, "r+") as f:
         # remove the line where site is at, not entire file
         lines = f.readlines()
     
