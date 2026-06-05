@@ -1,18 +1,22 @@
-from threading import Timer
+# main.py
 from hostfileservice import block, unblock
+import sys
 
-blocked_sites = []
-blocked_apps = []
 
 """
     to run -> python app.py
     install npm (npm install) and run (npm run dev)
 """
 
+
+blocked_sites = []
+blocked_apps = []
+
+
 def displayinfo():
     request = input("Do you want to see your blocked 'site's or 'app's? ").strip().lower()
 
-    if request == "no" or request == "n":
+    if request in ("no", "n"):
         return
 
     if request == "site":
@@ -29,18 +33,45 @@ def displayinfo():
     else:
         print("Invalid choice.")
 
+
 def sitelogic():
     sites = input("Enter websites to block (comma separated, e.g. youtube.com, facebook.com): ")
     site_list = [site.strip() for site in sites.split(",") if site.strip()]
-    blocked_sites.extend(site_list)
+    if not site_list:
+        print("No sites entered.")
+        return
+    
+    try:
+        block(site_list)
+    except PermissionError as e:
+        print(e)
+        return
+    
+    for site in site_list:
+        if site not in blocked_sites:
+            blocked_sites.append(site)
+
     print(f"Blocked sites: {blocked_sites}")
-    block(site_list)
+
+
+def validateinput(prompt):
+    confirm = input(f"{prompt} (y/n): ").strip().lower()
+    return confirm == "y"
+
 
 def applogic():
-    apps = input("Enter app names to block (comma separated, e.g. chrome,spotify): ")
+    apps = input("Enter app names to block (comma separated, e.g. chrome, spotify): ")
     app_list = [app.strip() for app in apps.split(",") if app.strip()]
-    blocked_apps.extend(app_list)
-    print(f"Blocked apps: {blocked_apps}")
+
+    if not app_list:
+        print("No apps entered.")
+        return
+    
+    for app in app_list:
+        if app not in blocked_apps:
+            blocked_apps.append(app)
+    print(f"Blocked apps (not yet fully blocked): {blocked_apps}")
+
 
 def unblocklogic():
     choice = input("Unblock 'site' or 'app'? ").strip().lower()
@@ -53,36 +84,52 @@ def unblocklogic():
         print(f"Currently blocked sites: {blocked_sites}")
         site = input("Enter site to unblock: ").strip()
         
-        if site in blocked_sites:
-            # blocked_sites.remove(site)
-            unblock([site])
-            print(f"Unblocked {site}. Remaining blocked sites: {blocked_sites}")
-        
-        else:
+        if site not in blocked_sites:
             print(f"{site} is not in the blocked list.")
-    
+            return
+        
+        if not validateinput(f"Unblock {site}?"):
+            print("Cancelled.")
+            return
+        
+        try:
+            unblock([site])
+        except PermissionError as e:
+            print(e)
+            return
+        
+        blocked_sites.remove(site)
+        print(f"Unblocked {site}. Remaining blocked sites: {blocked_sites}")
+
+
     elif choice == "app":
         if not blocked_apps:
             print("No apps are currently blocked.")
             return
-        
+ 
         print(f"Currently blocked apps: {blocked_apps}")
-        app = input("Enter app to unblock: ").strip()
-        
-        if app in blocked_apps:
-            # blocked_apps.remove(app)
-            unblock(app)
-            print(f"Unblocked {app}. Remaining blocked apps: {blocked_apps}")
-        
-        else:
+        app = input("Enter app to unblock: ").strip().lower()
+ 
+        if app not in blocked_apps:
             print(f"{app} is not in the blocked list.")
+            return
+ 
+        if not validateinput(f"Unblock {app}?"):
+            print("Cancelled.")
+            return
+ 
+        blocked_apps.remove(app)
+        print(f"Unblocked {app}. Remaining blocked apps: {blocked_apps}")
+
     
     else:
         print("Invalid choice. Please enter 'site' or 'app'.")
 
+
 def quitlogic():
     print("Exiting XamGuard. Stay focused!")
     exit()
+
 
 
 INPUT_HANDLING = {
@@ -93,27 +140,22 @@ INPUT_HANDLING = {
 }
 
 
+
 # HELPERS
 def fixinput(text):
     return text.strip().lower()
 
-def validateinput(prompt):
-    confirm = input(f"{prompt} (y/n): ").strip().lower()
-    return confirm == "y"
+
 
 def main():
-    print("Welcome to XamGuard, rapture yourself from procrastination!")
+    print("Welcome to XamGuard, free yourself from procrastination!")
 
     while True:
         optionchoice = input("Choose: site | app | unblock | view blacklist | quit: ")
-        optionchoice = fixinput(optionchoice)
+        handling = INPUT_HANDLING.get(optionchoice)
 
-        if optionchoice == "site": sitelogic()
-        elif optionchoice == "app": applogic()
-        elif optionchoice == "unblock": unblocklogic()
-        elif optionchoice == "view blacklist" or optionchoice == "view": displayinfo() 
-        elif optionchoice == "quit" or optionchoice == "q": quitlogic()
-        
+        if handling:
+            handling()
         else:
             print("Invalid option. Please choose again.")
 
