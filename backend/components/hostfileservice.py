@@ -12,6 +12,7 @@ TAGS = "# XAMGUARD"
 ip = "127.0.0.1"
 
 
+
 def gethostpath():
     system = platform.system()
     
@@ -23,6 +24,8 @@ def gethostpath():
         raise NotImplementedError(f"Unsupported OS: {system}")
 
 HOST_PATH = os.environ.get("XAMGUARD_HOSTS_PATH") or gethostpath()
+
+
 
 def domainexpansion(domains):
     result = []
@@ -47,6 +50,8 @@ def domainexpansion(domains):
     
     return result
 
+
+
 def readlines():
     try:
         with open(HOST_PATH, "r", encoding="utf=8") as fix:
@@ -55,6 +60,8 @@ def readlines():
         raise PermissionError(
             "Can't read the hosts file. Run XamGuards as administrator/root."
         )
+
+
 
 def alreadyblocked(lines):
     blocked = set()
@@ -70,6 +77,8 @@ def alreadyblocked(lines):
             blocked.add(parts[1].lower())
     return blocked
 
+
+
 def dnsflush():
     sys = platform.system()
 
@@ -81,12 +90,14 @@ def dnsflush():
     except (subprocess.CalledProcessError, FileNotFoundError):
         pass
 
+
+
 def block(websites):
     domains = domainexpansion(websites)
     if not domains:
         print("No websites to block.")
         return
-    lines = readlines()
+    lines = readlines() 
     alreadyread = alreadyblocked(lines)
     addothers = [d for d in domains if d not in alreadyread]
 
