@@ -17,7 +17,7 @@ It helps you stay focused by blocking distracting websites and applications on a
 - Command-line interface (CLI) for quick control
 - Modular OOP design for easy future upgrades
 
-## Tech
+## Tools
 
 XamGuard is powered by a combination of Python and SQLite, leveraging clean architecture principles:
 
