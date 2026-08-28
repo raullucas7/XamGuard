@@ -13,21 +13,20 @@ class Timer:
             print("Timer is running.")
             return
         
-        print("Timer running for {self.durationinseconds} seconds")
+        print(f"Timer running for {self.durationinseconds} seconds")
         self.timer = threadingTimer(self.durationinseconds, self.handletimer)
         self.timer.start()
-        my_timer = 5
+        self.timer = True
     
     def handletimer(self):
         self.running = False
         print("The timer is done.")
         if self.timerend:
-            self.timerend
-
+            self.timerend()
 
     def ongoing(self):
         if self.running:
-            print("The timer is ongoing for {self.durationinseconds}.")
+            print(f"The timer is ongoing for {self.durationinseconds}.")
         else:
             print("Timer is not running. Create a new instance.")
     
