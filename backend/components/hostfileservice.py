@@ -26,7 +26,7 @@ def gethostpath():
 HOST_PATH = os.environ.get("XAMGUARD_HOSTS_PATH") or gethostpath()
 
 
-
+# get the site and strip it down to something readable
 def domainexpansion(domains):
     result = []
     seendomains = set()
@@ -39,7 +39,7 @@ def domainexpansion(domains):
 
         variant = [site]
 
-        if site.startwith("www."):
+        if site.startswith("www."):
             variant.append(site[4:])
         else:
             variant.append(f"www.{site}")
@@ -54,7 +54,7 @@ def domainexpansion(domains):
 
 def readlines():
     try:
-        with open(HOST_PATH, "r", encoding="utf=8") as fix:
+        with open(HOST_PATH, "r", encoding="utf-8") as fix:
             return fix.readlines()
     except PermissionError:
         raise PermissionError(
@@ -93,10 +93,13 @@ def dnsflush():
 
 
 def block(websites):
+    # make the sites parsable
     domains = domainexpansion(websites)
+
     if not domains:
         print("No websites to block.")
         return
+    
     lines = readlines() 
     alreadyread = alreadyblocked(lines)
     addothers = [d for d in domains if d not in alreadyread]
@@ -113,11 +116,12 @@ def block(websites):
                 f.write("\n")
             for d in addothers:
                 f.write(f"{ip} {d} {TAGS}\n")
+
     except PermissionError:
         raise PermissionError(
             "Can't write the hosts file. Run XamGuard as administrator/root."
         )
- 
+
     dnsflush()
     print("Blocked:", ", ".join(addothers))
 
@@ -129,24 +133,24 @@ def unblock(websites):
         print("Nothing to unblock.")
         return
     
-    lines = f.readlines()
-    kept = []
+    lines = readlines()
+    kept_lines = []
     removedwebsites = []
 
     for line in lines:
         strippedlines = line.strip()
         parts = strippedlines.split()
-        kept = (
-            strippedlines.split()
+        should_remove = (
+            bool(parts)
             and len(parts) >= 2
             and parts[0] == ip
             and parts[1].lower() in domains
         )
 
-        if kept:
+        if should_remove:
             removedwebsites.append(parts[1].lower())
         else:
-            kept.append(line)
+            kept_lines.append(line)
         
     if not removedwebsites:
         print("None of these sites are blocked")
@@ -154,7 +158,7 @@ def unblock(websites):
     
     try:
         with open(HOST_PATH, "w", encoding="utf-8") as f:
-            f.writelines(kept)
+            f.writelines(kept_lines)
     except PermissionError:
         raise PermissionError(
             "Can't write the hosts file, Run Xamguard as an ADMIN."
