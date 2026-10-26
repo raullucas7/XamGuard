@@ -43,7 +43,7 @@ def sitelogic():
     
     try:
         block(site_list)
-    except PermissionError as e:
+    except (PermissionError, ValueError) as e:
         print(e)
         return
     
@@ -94,7 +94,7 @@ def unblocklogic():
         
         try:
             unblock([site])
-        except PermissionError as e:
+        except (PermissionError, ValueError) as e:
             print(e)
             return
         

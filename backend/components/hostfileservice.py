@@ -6,10 +6,17 @@ Block/unblock websites by editing the system hosts file (Windows-first)
 
 from datetime import datetime as DT
 import platform
+import re
 import subprocess
 import os
 TAGS = "# XAMGUARD"
 ip = "127.0.0.1"
+
+# A hostname is dot-separated labels (letters, digits, inner hyphens, max 63 chars each).
+# The last label (the TLD, like "com") must start with a letter, which also rejects IPs.
+LABEL = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
+TLD = r"[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?"
+DOMAIN_RE = re.compile(rf"(?:{LABEL}\.)+{TLD}")
 
 
 
@@ -26,28 +33,42 @@ def gethostpath():
 HOST_PATH = os.environ.get("XAMGUARD_HOSTS_PATH") or gethostpath()
 
 
-# get the site and strip it down to something readable
+def normalizedomain(raw):
+    """Reduce user input to a bare hostname, or raise ValueError if it can't be one."""
+    site = raw.strip().lower()
+    site = re.sub(r"^[a-z][a-z0-9+.-]*://", "", site)   # https://
+    site = re.split(r"[/?#]", site, maxsplit=1)[0]       # /path  ?query  #fragment
+    site = site.rsplit("@", 1)[-1]                       # user:password@
+    site = re.sub(r":\d+$", "", site)                    # :8080
+    site = site.rstrip(".")                              # trailing dot
+
+    if len(site) > 253 or not DOMAIN_RE.fullmatch(site):
+        raise ValueError(
+            f"'{raw.strip()}' is not a valid website (try something like youtube.com)"
+        )
+    return site
+
+
+def withwww(site):
+    """The site plus its twin: youtube.com -> [youtube.com, www.youtube.com] (and back)."""
+    twin = site[4:] if site.startswith("www.") else f"www.{site}"
+    return [site, twin]
+
+
+# get the sites, clean them up, and add the www/non-www twin of each
 def domainexpansion(domains):
     result = []
     seendomains = set()
 
     for raw in domains:
-        site = raw.strip().lower()
-
-        if not site:
+        if not raw.strip():
             continue
 
-        variant = [site]
-
-        if site.startswith("www."):
-            variant.append(site[4:])
-        else:
-            variant.append(f"www.{site}")
-        for var in variant:
+        for var in withwww(normalizedomain(raw)):
             if var not in seendomains:
                 seendomains.add(var)
                 result.append(var)
-    
+
     return result
 
 
@@ -56,35 +77,47 @@ def readlines():
     try:
         with open(HOST_PATH, "r", encoding="utf-8") as fix:
             return fix.readlines()
+    except FileNotFoundError:
+        return []
     except PermissionError:
         raise PermissionError(
-            "Can't read the hosts file. Run XamGuards as administrator/root."
+            "Can't read the hosts file. Run XamGuard as administrator/root."
         )
 
 
 
+def parsetagged(line):
+    """If this hosts-file line was written by XamGuard, return its domain, else None."""
+    strippedline = line.strip()
+
+    if not strippedline.endswith(TAGS):
+        return None
+    parts = strippedline.split()
+
+    if len(parts) >= 2 and parts[0] == ip:
+        return parts[1].lower()
+    return None
+
+
+
 def alreadyblocked(lines):
-    blocked = set()
+    return {domain for domain in map(parsetagged, lines) if domain}
 
-    for line in lines:
-        strippedlines = line.strip()
 
-        if not strippedlines.endswith(TAGS):
-            continue
-        parts = strippedlines.split()
 
-        if len(parts) >= 2 and parts[0] == ip:
-            blocked.add(parts[1].lower())
-    return blocked
+def list_blocked():
+    """The sites XamGuard has blocked, sorted, one entry per site (no www. twins)."""
+    sites = {d[4:] if d.startswith("www.") else d for d in alreadyblocked(readlines())}
+    return sorted(sites)
 
 
 
 def dnsflush():
-    sys = platform.system()
+    system = platform.system()
 
     try:
-        if sys == "Windows":
-            subprocess.run(["ipconfig", "/flushdns"], check=True, get_output=True)
+        if system == "Windows":
+            subprocess.run(["ipconfig", "/flushdns"], check=True, capture_output=True)
         # elif sys == "Darwin" (MAC)
 
     except (subprocess.CalledProcessError, FileNotFoundError):
@@ -93,21 +126,23 @@ def dnsflush():
 
 
 def block(websites):
+    """Block the sites. Returns the hosts entries actually added (empty if nothing new).
+
+    Raises ValueError, before writing anything, if any site isn't a valid hostname.
+    """
     # make the sites parsable
     domains = domainexpansion(websites)
 
     if not domains:
-        print("No websites to block.")
-        return
-    
-    lines = readlines() 
+        return []
+
+    lines = readlines()
     alreadyread = alreadyblocked(lines)
     addothers = [d for d in domains if d not in alreadyread]
 
     if not addothers:
-        print("All requested sites are already blocked")
-        return
-    
+        return []
+
     needsnewline = bool(lines) and not lines[-1].endswith("\n")
 
     try:
@@ -123,46 +158,62 @@ def block(websites):
         )
 
     dnsflush()
-    print("Blocked:", ", ".join(addothers))
+    return addothers
+
+
+
+def unblocktargets(websites):
+    """Every hosts entry that should count as 'these sites', for unblocking."""
+    targets = set()
+
+    for raw in websites:
+        literal = raw.strip().lower()
+        if not literal:
+            continue
+
+        # The text exactly as given: lets you remove junk an older version wrote.
+        targets.update(withwww(literal))
+
+        # Its cleaned-up form too, so pasting a full URL still works.
+        try:
+            targets.update(domainexpansion([raw]))
+        except ValueError:
+            pass
+    return targets
 
 
 
 def unblock(websites):
-    domains = set(domainexpansion(websites))
+    """Unblock the sites. Returns the hosts entries actually removed.
+
+    Only lines XamGuard wrote (the tagged ones) are ever removed.
+    """
+    domains = unblocktargets(websites)
     if not domains:
-        print("Nothing to unblock.")
-        return
-    
+        return []
+
     lines = readlines()
     kept_lines = []
     removedwebsites = []
 
     for line in lines:
-        strippedlines = line.strip()
-        parts = strippedlines.split()
-        should_remove = (
-            bool(parts)
-            and len(parts) >= 2
-            and parts[0] == ip
-            and parts[1].lower() in domains
-        )
+        domain = parsetagged(line)
 
-        if should_remove:
-            removedwebsites.append(parts[1].lower())
+        if domain in domains:
+            removedwebsites.append(domain)
         else:
             kept_lines.append(line)
-        
+
     if not removedwebsites:
-        print("None of these sites are blocked")
-        return
-    
+        return []
+
     try:
         with open(HOST_PATH, "w", encoding="utf-8") as f:
             f.writelines(kept_lines)
     except PermissionError:
         raise PermissionError(
-            "Can't write the hosts file, Run Xamguard as an ADMIN."
+            "Can't write the hosts file. Run XamGuard as administrator/root."
         )
 
     dnsflush()
-    print("Unblocked: ", ", ".join(removedwebsites))
+    return removedwebsites
