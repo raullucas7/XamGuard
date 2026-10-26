@@ -1,5 +1,5 @@
 # main.py
-from hostfileservice import block, unblock
+from xamguard.hostfileservice import block, unblock
 import sys
 
 

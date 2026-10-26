@@ -1,13 +1,13 @@
 import pytest
 
-import hostfileservice as h
+from xamguard import hostfileservice as h
 
 ORIGINAL = "127.0.0.1 localhost\n# a comment\n127.0.0.1 example.dev\n"
 
 
 @pytest.fixture
 def hosts(tmp_path, monkeypatch):
-    """A throwaway hosts file. The real one is never touched, and ipconfig never runs."""
+    """Fake hosts file, so the real one is never touched."""
     path = tmp_path / "hosts"
     path.write_text(ORIGINAL)
     monkeypatch.setattr(h, "HOST_PATH", str(path))
@@ -36,7 +36,7 @@ def test_normalizedomain_accepts_and_cleans(raw, expected):
     "localhost",
     "127.0.0.1",
     "not a site",
-    "good.com\n127.0.0.1 bank.com",  # must not be able to smuggle in a second hosts line
+    "good.com\n127.0.0.1 bank.com",  # can't sneak in a second line
     "-bad.com",
     "bad-.com",
     "a_b.com",
@@ -64,6 +64,11 @@ def test_domainexpansion_dedupes_and_skips_blanks():
 def test_domainexpansion_rejects_invalid():
     with pytest.raises(ValueError):
         h.domainexpansion(["good.com", "bad site"])
+
+
+def test_plainsites_hides_www_twins_and_keeps_order():
+    entries = ["youtube.com", "www.youtube.com", "www.a.com", "b.com"]
+    assert h.plainsites(entries) == ["youtube.com", "a.com", "b.com"]
 
 
 # ---------- block ----------
@@ -133,9 +138,9 @@ def test_list_blocked_is_sorted_deduped_and_only_shows_our_lines(hosts):
 
 
 def test_list_blocked_survives_a_restart(hosts):
-    """The old bug: blocked sites lived in a Python list and were forgotten on restart."""
+    """Old bug: the list lived in memory and was lost on restart."""
     h.block(["youtube.com"])
-    # "restart" = nothing in memory; everything must come from the file
+    # nothing in memory, so it has to come from the file
     assert h.list_blocked() == ["youtube.com"]
 
 
@@ -163,7 +168,7 @@ def test_unblock_only_removes_the_requested_site(hosts):
 
 
 def test_unblock_never_touches_lines_xamguard_did_not_write(hosts):
-    """The old bug: unblock('example.dev') deleted a hand-written, untagged line."""
+    """Old bug: this deleted lines XamGuard didn't write."""
     assert h.unblock(["example.dev"]) == []
     assert hosts.read_text() == ORIGINAL
 
@@ -183,7 +188,7 @@ def test_unblock_can_remove_junk_an_older_version_wrote(hosts):
     shown = h.list_blocked()
     assert shown == ["https://youtube.com/watch?v=1"]
 
-    # Whatever the app shows in its list, the app must be able to remove.
+    # anything shown in the list has to be removable
     h.unblock(shown)
     assert hosts.read_text() == ORIGINAL
 
@@ -201,9 +206,8 @@ def test_block_and_unblock_flush_dns(hosts, monkeypatch):
 
 
 def test_dnsflush_does_not_crash():
-    """Regression: used to raise TypeError (get_output= instead of capture_output=).
+    """Used to crash (get_output instead of capture_output).
 
-    This one calls the real function. On Windows that really runs `ipconfig /flushdns`
-    (harmless, it just clears the DNS cache); on other systems it does nothing.
+    Runs the real ipconfig /flushdns on Windows, which is harmless.
     """
     h.dnsflush()

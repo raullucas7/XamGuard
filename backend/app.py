@@ -1,6 +1,6 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from components.hostfileservice import block, unblock
+from xamguard.hostfileservice import block, unblock
 
 app = Flask(__name__)
 CORS(app)

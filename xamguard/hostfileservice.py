@@ -12,8 +12,8 @@ import os
 TAGS = "# XAMGUARD"
 ip = "127.0.0.1"
 
-# A hostname is dot-separated labels (letters, digits, inner hyphens, max 63 chars each).
-# The last label (the TLD, like "com") must start with a letter, which also rejects IPs.
+# dot-separated labels, max 63 chars each
+# the last one (com, org...) must start with a letter, so IPs get rejected
 LABEL = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
 TLD = r"[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?"
 DOMAIN_RE = re.compile(rf"(?:{LABEL}\.)+{TLD}")
@@ -34,7 +34,7 @@ HOST_PATH = os.environ.get("XAMGUARD_HOSTS_PATH") or gethostpath()
 
 
 def normalizedomain(raw):
-    """Reduce user input to a bare hostname, or raise ValueError if it can't be one."""
+    """turn what the user typed into a bare hostname, or raise ValueError."""
     site = raw.strip().lower()
     site = re.sub(r"^[a-z][a-z0-9+.-]*://", "", site)   # https://
     site = re.split(r"[/?#]", site, maxsplit=1)[0]       # /path  ?query  #fragment
@@ -42,7 +42,7 @@ def normalizedomain(raw):
     site = re.sub(r":\d+$", "", site)                    # :8080
     site = site.rstrip(".")                              # trailing dot
 
-    if len(site) > 253 or not DOMAIN_RE.fullmatch(site):
+    if (len(site) > 253) or not DOMAIN_RE.fullmatch(site):
         raise ValueError(
             f"'{raw.strip()}' is not a valid website (try something like youtube.com)"
         )
@@ -50,12 +50,12 @@ def normalizedomain(raw):
 
 
 def withwww(site):
-    """The site plus its twin: youtube.com -> [youtube.com, www.youtube.com] (and back)."""
+    """The site plus its www/non-www twin."""
     twin = site[4:] if site.startswith("www.") else f"www.{site}"
     return [site, twin]
 
 
-# get the sites, clean them up, and add the www/non-www twin of each
+# get the site and strip it down to something readable
 def domainexpansion(domains):
     result = []
     seendomains = set()
@@ -87,7 +87,7 @@ def readlines():
 
 
 def parsetagged(line):
-    """If this hosts-file line was written by XamGuard, return its domain, else None."""
+    """domain from a line XamGuard wrote, or None for any other line."""
     strippedline = line.strip()
 
     if not strippedline.endswith(TAGS):
@@ -105,10 +105,22 @@ def alreadyblocked(lines):
 
 
 
+def plainsites(entries):
+    """['youtube.com', 'www.youtube.com'] -> ['youtube.com']. hides the www twins."""
+    
+    names = []
+    for entry in entries:
+        name = entry[4:] if entry.startswith("www.") else entry
+        if name not in names:
+            names.append(name)
+            
+    return names
+
+
+
 def list_blocked():
-    """The sites XamGuard has blocked, sorted, one entry per site (no www. twins)."""
-    sites = {d[4:] if d.startswith("www.") else d for d in alreadyblocked(readlines())}
-    return sorted(sites)
+    """sites XamGuard blocked, sorted, without the www twins."""
+    return sorted(plainsites(alreadyblocked(readlines())))
 
 
 
@@ -117,19 +129,22 @@ def dnsflush():
 
     try:
         if system == "Windows":
-            subprocess.run(["ipconfig", "/flushdns"], check=True, capture_output=True)
-        # elif sys == "Darwin" (MAC)
+            subprocess.run(
+                ["ipconfig", "/flushdns"],
+                check=True,
+                capture_output=True,
+                timeout=10,  # a stuck ipconfig shouldn't freeze the window
+                creationflags=subprocess.CREATE_NO_WINDOW,  # no console flash
+            )
+        # elif system == "Darwin" (MAC)
 
-    except (subprocess.CalledProcessError, FileNotFoundError):
+    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
         pass
 
 
 
 def block(websites):
-    """Block the sites. Returns the hosts entries actually added (empty if nothing new).
-
-    Raises ValueError, before writing anything, if any site isn't a valid hostname.
-    """
+    """returns what got added. raises ValueError (before writing) on a bad site."""
     # make the sites parsable
     domains = domainexpansion(websites)
 
@@ -163,7 +178,7 @@ def block(websites):
 
 
 def unblocktargets(websites):
-    """Every hosts entry that should count as 'these sites', for unblocking."""
+    """everything that counts as 'these sites' when unblocking."""
     targets = set()
 
     for raw in websites:
@@ -171,10 +186,10 @@ def unblocktargets(websites):
         if not literal:
             continue
 
-        # The text exactly as given: lets you remove junk an older version wrote.
+        # the text as typed, so old junk entries can still be removed
         targets.update(withwww(literal))
 
-        # Its cleaned-up form too, so pasting a full URL still works.
+        # plus the cleaned up version, so pasted URLs work
         try:
             targets.update(domainexpansion([raw]))
         except ValueError:
@@ -184,10 +199,7 @@ def unblocktargets(websites):
 
 
 def unblock(websites):
-    """Unblock the sites. Returns the hosts entries actually removed.
-
-    Only lines XamGuard wrote (the tagged ones) are ever removed.
-    """
+    """returns what got removed. only touches lines XamGuard wrote."""
     domains = unblocktargets(websites)
     if not domains:
         return []
