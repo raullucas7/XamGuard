@@ -193,6 +193,123 @@ def test_unblock_can_remove_junk_an_older_version_wrote(hosts):
     assert hosts.read_text() == ORIGINAL
 
 
+# ---------- timed blocks ----------
+
+def test_parseentry_reads_permanent_and_timed_lines():
+    assert h.parseentry("127.0.0.1 youtube.com # XAMGUARD\n") == ("youtube.com", None)
+    assert h.parseentry("127.0.0.1 youtube.com # XAMGUARD until=1761500000\n") == (
+        "youtube.com",
+        1761500000,
+    )
+
+
+@pytest.mark.parametrize("line", [
+    "127.0.0.1 localhost",
+    "# a comment",
+    "",
+    "127.0.0.1 example.dev # not ours",
+    "127.0.0.1 a.com # XAMGUARD until=soon",  # mangled, so not ours and never deleted
+])
+def test_parseentry_ignores_lines_that_are_not_ours(line):
+    assert h.parseentry(line) is None
+
+
+def test_block_with_until_writes_the_end_time(hosts):
+    h.block(["youtube.com"], until=1_000_300.7)
+
+    assert hosts.read_text() == (
+        ORIGINAL
+        + "127.0.0.1 youtube.com # XAMGUARD until=1000300\n"
+        + "127.0.0.1 www.youtube.com # XAMGUARD until=1000300\n"
+    )
+
+
+def test_list_blocked_until_shows_end_times(hosts):
+    h.block(["a.com"])
+    h.block(["b.com"], until=2_000_000)
+
+    assert h.list_blocked_until() == {"a.com": None, "b.com": 2_000_000}
+    assert h.list_blocked() == ["a.com", "b.com"]
+
+
+def test_list_blocked_until_merges_www_twins(hosts):
+    hosts.write_text(
+        ORIGINAL
+        + "127.0.0.1 a.com # XAMGUARD until=100\n"
+        + "127.0.0.1 www.a.com # XAMGUARD until=200\n"
+        + "127.0.0.1 b.com # XAMGUARD until=100\n"
+        + "127.0.0.1 www.b.com # XAMGUARD\n"
+        + "127.0.0.1 www.c.com # XAMGUARD\n"
+        + "127.0.0.1 c.com # XAMGUARD until=100\n"
+    )
+    # later time wins, and permanent wins whichever twin comes first
+    assert h.list_blocked_until() == {"a.com": 200, "b.com": None, "c.com": None}
+
+
+def test_unblock_expired_removes_only_timed_blocks_that_are_up(hosts):
+    h.block(["done.com"], until=1000)
+    h.block(["later.com"], until=5000)
+    h.block(["forever.com"])
+
+    assert h.unblock_expired(now=2000) == ["done.com"]
+    assert h.list_blocked_until() == {"later.com": 5000, "forever.com": None}
+
+
+def test_unblock_expired_counts_the_exact_end_second_as_up(hosts):
+    h.block(["a.com"], until=1000)
+    assert h.unblock_expired(now=999) == []
+    assert h.unblock_expired(now=1000) == ["a.com"]
+
+
+def test_unblock_expired_leaves_the_rest_of_the_file_alone(hosts):
+    h.block(["a.com"], until=1000)
+    h.unblock_expired(now=2000)
+    assert hosts.read_text() == ORIGINAL
+
+
+def test_unblock_expired_with_nothing_due_does_not_touch_the_file(hosts):
+    h.block(["a.com"], until=5000)
+    before = hosts.read_text()
+
+    assert h.unblock_expired(now=1) == []
+    assert hosts.read_text() == before
+
+
+def test_unblock_expired_ignores_lines_that_are_not_ours(hosts):
+    hosts.write_text(ORIGINAL + "127.0.0.1 x.com # until=5\n")
+    assert h.unblock_expired(now=2000) == []
+    assert "x.com" in hosts.read_text()
+
+
+def test_unblock_expired_uses_the_real_clock_by_default(hosts):
+    h.block(["old.com"], until=1)  # 1970
+    h.block(["far.com"], until=9_999_999_999)  # year 2286
+    assert h.unblock_expired() == ["old.com"]
+
+
+def test_timed_blocks_can_still_be_unblocked_early(hosts):
+    h.block(["a.com"], until=9_999_999_999)
+    assert h.unblock(["a.com"]) == ["a.com", "www.a.com"]
+    assert h.list_blocked() == []
+
+
+def test_blocking_an_already_timed_site_keeps_its_original_end_time(hosts):
+    h.block(["a.com"], until=1000)
+    assert h.block(["a.com"], until=9000) == []
+    assert h.list_blocked_until() == {"a.com": 1000}
+
+
+def test_unblock_expired_only_flushes_dns_when_it_removed_something(hosts, monkeypatch):
+    calls = []
+    monkeypatch.setattr(h, "dnsflush", lambda: calls.append("flush"))
+
+    h.block(["a.com"], until=1000)  # flush 1
+    h.unblock_expired(now=1)  # nothing due, no flush
+    h.unblock_expired(now=2000)  # flush 2
+
+    assert calls == ["flush", "flush"]
+
+
 # ---------- DNS flush ----------
 
 def test_block_and_unblock_flush_dns(hosts, monkeypatch):

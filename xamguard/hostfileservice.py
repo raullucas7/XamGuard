@@ -9,6 +9,7 @@ import platform
 import re
 import subprocess
 import os
+import time
 TAGS = "# XAMGUARD"
 ip = "127.0.0.1"
 
@@ -17,6 +18,9 @@ ip = "127.0.0.1"
 LABEL = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
 TLD = r"[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?"
 DOMAIN_RE = re.compile(rf"(?:{LABEL}\.)+{TLD}")
+
+# a line we wrote: ip, site, tag, and "until=<unix time>" if the block is timed
+ENTRY_RE = re.compile(rf"{re.escape(ip)}\s+(\S+)\s+{re.escape(TAGS)}(?:\s+until=(\d+))?")
 
 
 
@@ -86,17 +90,24 @@ def readlines():
 
 
 
+def parseentry(line):
+    """(domain, until) for a line XamGuard wrote, None for any other line.
+
+    until is the unblock time in unix seconds, or None if it stays until you unblock it.
+    """
+    match = ENTRY_RE.fullmatch(line.strip())
+    if not match:
+        return None
+
+    domain, until = match.groups()
+    return domain.lower(), (int(until) if until else None)
+
+
+
 def parsetagged(line):
     """domain from a line XamGuard wrote, or None for any other line."""
-    strippedline = line.strip()
-
-    if not strippedline.endswith(TAGS):
-        return None
-    parts = strippedline.split()
-
-    if len(parts) >= 2 and parts[0] == ip:
-        return parts[1].lower()
-    return None
+    entry = parseentry(line)
+    return entry[0] if entry else None
 
 
 
@@ -118,9 +129,30 @@ def plainsites(entries):
 
 
 
+def list_blocked_until():
+    """{site: unblock time in unix seconds, or None if it stays until you unblock it}"""
+    result = {}
+
+    for line in readlines():
+        entry = parseentry(line)
+        if not entry:
+            continue
+
+        domain, until = entry
+        name = domain[4:] if domain.startswith("www.") else domain
+
+        if name not in result:
+            result[name] = until
+        elif result[name] is not None:
+            # the www twin of a site we already saw. permanent wins, else the later time
+            result[name] = None if until is None else max(result[name], until)
+    return result
+
+
+
 def list_blocked():
     """sites XamGuard blocked, sorted, without the www twins."""
-    return sorted(plainsites(alreadyblocked(readlines())))
+    return sorted(list_blocked_until())
 
 
 
@@ -143,8 +175,11 @@ def dnsflush():
 
 
 
-def block(websites):
-    """returns what got added. raises ValueError (before writing) on a bad site."""
+def block(websites, until=None):
+    """returns what got added. raises ValueError (before writing) on a bad site.
+
+    until: unix time to unblock at, or None to stay blocked until you unblock it.
+    """
     # make the sites parsable
     domains = domainexpansion(websites)
 
@@ -159,13 +194,14 @@ def block(websites):
         return []
 
     needsnewline = bool(lines) and not lines[-1].endswith("\n")
+    tag = TAGS if until is None else f"{TAGS} until={int(until)}"
 
     try:
         with open(HOST_PATH, "a", encoding="utf-8") as f:
             if needsnewline:
                 f.write("\n")
             for d in addothers:
-                f.write(f"{ip} {d} {TAGS}\n")
+                f.write(f"{ip} {d} {tag}\n")
 
     except PermissionError:
         raise PermissionError(
@@ -203,16 +239,21 @@ def unblock(websites):
     domains = unblocktargets(websites)
     if not domains:
         return []
+    return removeentries(lambda domain, until: domain in domains)
 
+
+
+def removeentries(wanted):
+    """delete our lines where wanted(domain, until) is true. returns the domains removed."""
     lines = readlines()
     kept_lines = []
     removedwebsites = []
 
     for line in lines:
-        domain = parsetagged(line)
+        entry = parseentry(line)
 
-        if domain in domains:
-            removedwebsites.append(domain)
+        if entry and wanted(*entry):
+            removedwebsites.append(entry[0])
         else:
             kept_lines.append(line)
 
@@ -229,3 +270,10 @@ def unblock(websites):
 
     dnsflush()
     return removedwebsites
+
+
+
+def unblock_expired(now=None):
+    """unblock the timed sites whose time is up. returns their names."""
+    now = time.time() if now is None else now
+    return plainsites(removeentries(lambda domain, until: until is not None and until <= now))

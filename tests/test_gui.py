@@ -29,12 +29,30 @@ def tk_root():
     root.destroy()
 
 
+class FakeClock:
+    """a clock we move by hand"""
+
+    def __init__(self, now=1_000_000):
+        self.now = now
+
+    def __call__(self):
+        return self.now
+
+    def advance(self, seconds):
+        self.now += seconds
+
+
 @pytest.fixture
-def make_app(hosts, tk_root):
+def clock():
+    return FakeClock()
+
+
+@pytest.fixture
+def make_app(hosts, tk_root, clock):
     apps = []
 
     def make(admin_rights=True):
-        app = gui.XamGuardApp(tk_root, admin_rights=admin_rights)
+        app = gui.XamGuardApp(tk_root, admin_rights=admin_rights, clock=clock)
         apps.append(app)
         return app
 
@@ -157,6 +175,149 @@ def test_placeholder_row_cannot_be_unblocked(make_app, hosts):
 
     assert "Select one or more sites" in app.status_text.get()
     assert hosts.read_text() == before
+
+
+# ---------- timed blocks ----------
+
+@pytest.mark.parametrize("seconds, expected", [
+    (0, "0:00"),
+    (-5, "0:00"),
+    (0.2, "0:01"),  # rounds up, never shows 0:00 early
+    (59, "0:59"),
+    (60, "1:00"),
+    (1450, "24:10"),
+    (3599, "59:59"),
+    (3600, "1:00:00"),
+    (3725, "1:02:05"),
+])
+def test_formatremaining(seconds, expected):
+    assert gui.formatremaining(seconds) == expected
+
+
+def test_the_for_box_offers_every_duration(make_app):
+    app = make_app()
+    assert list(app.length_box["values"]) == list(gui.DURATIONS)
+    assert app.length_text.get() == "Until I unblock"
+
+
+def test_block_for_a_while_shows_a_countdown(make_app, clock):
+    app = make_app()
+    app.site_text.set("youtube.com")
+    app.length_text.set("25 minutes")
+
+    app.block_button.invoke()
+
+    assert shown(app) == ["youtube.com   (25:00 left)"]
+    assert h.list_blocked_until() == {"youtube.com": clock.now + 25 * 60}
+    assert app.status_text.get() == "Blocked for 25 minutes: youtube.com"
+
+
+def test_default_block_has_no_end_time(make_app):
+    app = make_app()
+    app.site_text.set("a.com")
+
+    app.block_button.invoke()
+
+    assert shown(app) == ["a.com"]
+    assert h.list_blocked_until() == {"a.com": None}
+    assert app.status_text.get() == "Blocked: a.com"
+
+
+def test_tick_counts_down(make_app, clock):
+    h.block(["a.com"], until=clock.now + 90)
+    app = make_app()
+    assert shown(app) == ["a.com   (1:30 left)"]
+
+    clock.advance(30)
+    app.tick()
+
+    assert shown(app) == ["a.com   (1:00 left)"]
+
+
+def test_tick_unblocks_a_site_when_its_time_is_up(make_app, clock):
+    h.block(["a.com"], until=clock.now + 60)
+    h.block(["keep.com"])
+    app = make_app()
+
+    clock.advance(60)  # exactly the end
+    app.tick()
+
+    assert shown(app) == ["keep.com"]
+    assert h.list_blocked() == ["keep.com"]
+    assert app.status_text.get() == "Time's up. Unblocked: a.com"
+
+
+def test_blocks_that_ended_while_the_app_was_closed_are_cleared_at_startup(make_app, clock):
+    h.block(["a.com"], until=clock.now - 10)
+    h.block(["keep.com"])
+
+    app = make_app()
+
+    assert shown(app) == ["keep.com"]
+    assert h.list_blocked() == ["keep.com"]
+    assert "Time's up" in app.status_text.get()
+
+
+def test_blocks_that_have_not_ended_survive_a_restart(make_app, clock):
+    h.block(["a.com"], until=clock.now + 600)
+    app = make_app()  # "restart"
+    assert shown(app) == ["a.com   (10:00 left)"]
+
+
+def test_without_admin_rights_expired_blocks_are_left_alone(make_app, hosts, clock):
+    h.block(["a.com"], until=clock.now + 5)
+    before = hosts.read_text()
+    app = make_app(admin_rights=False)
+
+    clock.advance(10)
+    app.tick()
+
+    assert hosts.read_text() == before
+    assert shown(app) == ["a.com   (time's up)"]
+
+
+def test_tick_keeps_the_selected_row(make_app, clock):
+    h.block(["a.com", "b.com"], until=clock.now + 600)
+    app = make_app()
+    app.listbox.selection_set(1)  # b.com
+
+    clock.advance(1)
+    app.tick()
+
+    assert app.selected_sites() == ["b.com"]
+
+
+def test_unblocking_does_not_select_the_next_site(make_app):
+    h.block(["a.com", "b.com"])
+    app = make_app()
+    app.listbox.selection_set(0)  # a.com
+
+    app.unblock_button.invoke()
+
+    assert shown(app) == ["b.com"]
+    assert app.selected_sites() == []
+
+
+def test_a_timed_site_can_be_unblocked_early(make_app, clock):
+    h.block(["a.com"], until=clock.now + 600)
+    app = make_app()
+    app.listbox.selection_set(0)
+
+    app.unblock_button.invoke()
+
+    assert h.list_blocked() == []
+
+
+def test_the_tick_is_cancelled_when_the_frame_is_destroyed(make_app, tk_root):
+    app = make_app()
+    job = app._tick_job
+
+    def pending():
+        return tk_root.tk.splitlist(tk_root.tk.call("after", "info"))
+
+    assert job in pending()
+    app.destroy()
+    assert job not in pending()
 
 
 # ---------- without administrator rights ----------
