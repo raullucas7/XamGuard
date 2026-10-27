@@ -6,16 +6,20 @@ Just buttons and clicks. All the hosts file work lives in hostfileservice.py.
 import ctypes
 import math
 import re
+import sqlite3
 import time
 import traceback
 import tkinter as tk
 from tkinter import messagebox, ttk
 
 from . import admin, hostfileservice
+from .db import Database
 
 GOOD = "#1b5e20"
 BAD = "#b00020"
 PLACEHOLDER = "No sites are blocked. You are free to roam (carefully)."
+NO_LOADOUTS = "(no loadouts yet)"
+LOADOUTS_OFF = "(loadouts unavailable)"
 
 # what the "For" box offers: label -> minutes (None = until you unblock it)
 DURATIONS = {
@@ -45,18 +49,20 @@ def formatremaining(seconds):
 
 
 class XamGuardApp(ttk.Frame):
-    def __init__(self, root, admin_rights=None, clock=time.time):
+    def __init__(self, root, admin_rights=None, clock=time.time, db=None):
         super().__init__(root, padding=16)
         self.root = root
-        # parameters so tests can fake being admin and fake the time
+        # parameters so tests can fake being admin, the time and the database
         self.admin_rights = admin.is_admin() if admin_rights is None else admin_rights
         self.clock = clock
+        self.db = db  # None = loadouts are switched off (say the database wouldn't open)
+        self.editor = None  # the "Edit loadouts" window while it's open
         self.sites = []  # the Listbox just shows this list
         self.until = {}  # site -> when it gets unblocked (None = when you unblock it)
         self._tick_job = None
 
         root.title("XamGuard")
-        root.minsize(420, 520)
+        root.minsize(420, 640)
         self.pack(fill="both", expand=True)
 
         self.site_text = tk.StringVar()
@@ -64,6 +70,7 @@ class XamGuardApp(ttk.Frame):
         self.status_text = tk.StringVar()
         self._build()
         self.refresh()
+        self.refresh_loadouts()
         if self.admin_rights:
             self.end_expired()  # timed blocks that ended while the app was closed
         self._schedule_tick()
@@ -104,6 +111,26 @@ class XamGuardApp(ttk.Frame):
         ttk.Label(self, text="e.g. youtube.com, facebook.com", foreground="gray").pack(
             anchor="w", pady=(4, 0)
         )
+
+        loadouts = ttk.LabelFrame(self, text="Loadouts", padding=12)
+        loadouts.pack(fill="x", pady=(12, 0))
+        pickrow = ttk.Frame(loadouts)
+        pickrow.pack(fill="x")
+        self.loadout_text = tk.StringVar()
+        self.loadout_box = ttk.Combobox(pickrow, textvariable=self.loadout_text, state="readonly")
+        self.loadout_box.pack(side="left", fill="x", expand=True)
+        self.loadout_button = ttk.Button(
+            pickrow, text="Block loadout", command=self.on_block_loadout
+        )
+        self.loadout_button.pack(side="left", padx=(8, 0))
+
+        editrow = ttk.Frame(loadouts)
+        editrow.pack(fill="x", pady=(8, 0))
+        ttk.Label(editrow, text='Uses the "For" time above.', foreground="gray").pack(side="left")
+        self.edit_button = ttk.Button(
+            editrow, text="Edit loadouts...", command=self.on_edit_loadouts
+        )
+        self.edit_button.pack(side="right")
 
         self.listing = ttk.LabelFrame(self, text="Currently blocked", padding=12)
         self.listing.pack(fill="both", expand=True, pady=(12, 0))
@@ -233,6 +260,11 @@ class XamGuardApp(ttk.Frame):
         if self._tick_job:
             self.after_cancel(self._tick_job)
             self._tick_job = None
+        if self.editor is not None:
+            try:
+                self.editor.destroy()  # it belongs to the root, not to this frame
+            except tk.TclError:
+                pass  # already gone
         super().destroy()
 
     # ---------- reacting to clicks ----------
@@ -246,6 +278,28 @@ class XamGuardApp(ttk.Frame):
             self.say("Type a site to block, like youtube.com.", error=True)
             return
 
+        self._block_sites(sites, clear_entry=True)
+
+    def on_block_loadout(self):
+        if not self._need_admin():
+            return
+        if self.db is None:
+            self.say("Loadouts are unavailable.", error=True)
+            return
+
+        try:
+            loadout = self.db.get_loadout(self.loadout_text.get())
+        except sqlite3.Error as error:
+            self.say(str(error), error=True)
+            return
+
+        if not loadout or not loadout["sites"]:
+            self.say("That loadout has no sites to block.", error=True)
+            return
+        self._block_sites(loadout["sites"], label=loadout["name"])
+
+    def _block_sites(self, sites, label=None, clear_entry=False):
+        """Block the sites for the time in the "For" box. label = the loadout's name, if any."""
         minutes = DURATIONS[self.length_text.get()]
         until = None if minutes is None else self.clock() + minutes * 60
 
@@ -255,13 +309,43 @@ class XamGuardApp(ttk.Frame):
             self.say(str(error), error=True)
             return
 
-        self.site_text.set("")
+        if clear_entry:
+            self.site_text.set("")
         self.refresh()
         if added:
             length = "" if minutes is None else f" for {self.length_text.get()}"
-            self.say(f"Blocked{length}: " + ", ".join(hostfileservice.plainsites(added)))
+            who = f"{label} loadout blocked" if label else "Blocked"
+            self.say(f"{who}{length}: " + ", ".join(hostfileservice.plainsites(added)))
+        elif label:
+            self.say(f"Everything in {label} was already blocked.")
         else:
             self.say("Those sites were already blocked.")
+
+    def on_edit_loadouts(self):
+        if self.db is None:
+            return
+        if self.editor is not None and self.editor.winfo_exists():
+            self.editor.lift()  # already open, don't make a second one
+            return
+        self.editor = LoadoutEditor(self.root, self.db, on_change=self.refresh_loadouts)
+
+    def refresh_loadouts(self):
+        """Reload the loadout names into the dropdown, and enable or disable the buttons."""
+        names = []
+        if self.db is not None:
+            try:
+                names = self.db.loadout_names()
+            except sqlite3.Error as error:
+                self.say(str(error), error=True)
+
+        self.loadout_box.configure(values=names)
+        if self.loadout_text.get() not in names:  # keep the pick if it still exists
+            empty = NO_LOADOUTS if self.db is not None else LOADOUTS_OFF
+            self.loadout_text.set(names[0] if names else empty)
+
+        can_block = bool(names) and self.admin_rights
+        self.loadout_button.state(["!disabled" if can_block else "disabled"])
+        self.edit_button.state(["!disabled" if self.db is not None else "disabled"])
 
     def on_unblock(self):
         if not self._need_admin():
@@ -297,6 +381,151 @@ class XamGuardApp(ttk.Frame):
         return False
 
 
+class LoadoutEditor(tk.Toplevel):
+    """The "Edit loadouts" window: pick one on the left, edit it on the right."""
+
+    def __init__(self, parent, db, on_change=None):
+        super().__init__(parent)
+        self.db = db
+        self.on_change = on_change  # called after a save or a delete
+        self.names = []  # the Listbox just shows this list
+        self.current = None  # name of the loadout being edited, None = a new one
+        self.apps = []  # kept as they are for now, so saving doesn't wipe them
+
+        self.title("Edit loadouts")
+        self.minsize(540, 360)
+        self.transient(parent)
+        self.name_text = tk.StringVar()
+        self.status_text = tk.StringVar()
+        self._build()
+        self.refresh_names()
+
+    def _build(self):
+        body = ttk.Frame(self, padding=12)
+        body.pack(fill="both", expand=True)
+
+        left = ttk.Frame(body)
+        left.pack(side="left", fill="y")
+        # exportselection=False: otherwise clicking in the Sites box deselects the loadout
+        self.listbox = tk.Listbox(
+            left, exportselection=False, activestyle="none", width=22, font=("Segoe UI", 11)
+        )
+        self.listbox.pack(fill="y", expand=True)
+        self.listbox.bind("<<ListboxSelect>>", lambda event: self.on_pick())
+        ttk.Button(left, text="New loadout", command=self.on_new).pack(fill="x", pady=(8, 0))
+
+        right = ttk.Frame(body)
+        right.pack(side="left", fill="both", expand=True, padx=(12, 0))
+        ttk.Label(right, text="Name").pack(anchor="w")
+        self.name_entry = ttk.Entry(right, textvariable=self.name_text)
+        self.name_entry.pack(fill="x")
+        ttk.Label(right, text="Sites (separate with commas, spaces or new lines)").pack(
+            anchor="w", pady=(10, 0)
+        )
+        self.sites_box = tk.Text(right, height=10, width=30, font=("Segoe UI", 11), wrap="word")
+        self.sites_box.pack(fill="both", expand=True)
+
+        buttons = ttk.Frame(right)
+        buttons.pack(fill="x", pady=(8, 0))
+        self.save_button = ttk.Button(buttons, text="Save", command=self.on_save)
+        self.save_button.pack(side="left")
+        self.delete_button = ttk.Button(buttons, text="Delete", command=self.on_delete)
+        self.delete_button.pack(side="left", padx=(8, 0))
+        ttk.Button(buttons, text="Close", command=self.destroy).pack(side="right")
+
+        self.status_label = ttk.Label(right, textvariable=self.status_text, wraplength=300)
+        self.status_label.pack(anchor="w", pady=(8, 0))
+
+    def say(self, text, error=False):
+        self.status_text.set(text)
+        self.status_label.configure(foreground=BAD if error else GOOD)
+
+    def refresh_names(self, select=None):
+        try:
+            self.names = self.db.loadout_names()
+        except sqlite3.Error as error:
+            self.names = []
+            self.say(str(error), error=True)
+
+        self.listbox.delete(0, "end")
+        for name in self.names:
+            self.listbox.insert("end", name)
+        if select in self.names:
+            self.listbox.selection_set(self.names.index(select))
+
+    def on_pick(self):
+        picked = self.listbox.curselection()
+        if not picked:
+            return
+
+        try:
+            loadout = self.db.get_loadout(self.names[picked[0]])
+        except sqlite3.Error as error:
+            self.say(str(error), error=True)
+            return
+        if loadout is None:
+            return
+
+        self.current = loadout["name"]
+        self.apps = loadout["apps"]
+        self.name_text.set(loadout["name"])
+        self.sites_box.delete("1.0", "end")
+        self.sites_box.insert("1.0", "\n".join(loadout["sites"]))
+        self.say("")
+
+    def on_new(self):
+        self.listbox.selection_clear(0, "end")
+        self.current = None
+        self.apps = []
+        self.name_text.set("")
+        self.sites_box.delete("1.0", "end")
+        self.name_entry.focus_set()
+        self.say("")
+
+    def on_save(self):
+        name = self.name_text.get().strip()
+        sites = splitinput(self.sites_box.get("1.0", "end"))
+
+        try:
+            # save_loadout replaces a loadout that already has this name. fine when editing,
+            # but a "new" one must not quietly overwrite somebody else's
+            if self.current is None and self.db.get_loadout(name):
+                self.say(f"'{name}' already exists. Pick it in the list to edit it.", error=True)
+                return
+            saved = self.db.save_loadout(name, sites, apps=self.apps, old_name=self.current)
+        except (ValueError, sqlite3.Error) as error:
+            self.say(str(error), error=True)
+            return
+
+        self.current = saved
+        self.refresh_names(select=saved)
+        self.say(f"Saved {saved}.")
+        self._changed()
+
+    def on_delete(self):
+        if self.current is None:
+            self.say("Pick a loadout to delete first.", error=True)
+            return
+        if not messagebox.askyesno("Delete loadout", f"Delete '{self.current}'?", parent=self):
+            return
+
+        gone = self.current
+        try:
+            self.db.delete_loadout(gone)
+        except sqlite3.Error as error:
+            self.say(str(error), error=True)
+            return
+
+        self.on_new()
+        self.refresh_names()
+        self.say(f"Deleted {gone}.")
+        self._changed()
+
+    def _changed(self):
+        if self.on_change:
+            self.on_change()
+
+
 def show_unexpected_error(exc_type, exc, tb):
     """Popup for crashes in button handlers (no console to print to once packaged)."""
     traceback.print_exception(exc_type, exc, tb)
@@ -309,7 +538,19 @@ def run():
     except (AttributeError, OSError):
         pass
 
+    # if the database won't open, blocking still works, just without loadouts
+    database, problem = None, None
+    try:
+        database = Database()
+    except (sqlite3.Error, OSError) as error:
+        problem = str(error)
+
     root = tk.Tk()
     root.report_callback_exception = show_unexpected_error
-    XamGuardApp(root)
+    app = XamGuardApp(root, db=database)
+    if problem:
+        app.say(f"Loadouts are off, the database wouldn't open: {problem}", error=True)
     root.mainloop()
+
+    if database is not None:
+        database.close()
