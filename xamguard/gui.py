@@ -10,6 +10,7 @@ import sqlite3
 import time
 import traceback
 import tkinter as tk
+from pathlib import Path
 from tkinter import messagebox, ttk
 
 from . import admin, hostfileservice
@@ -20,6 +21,16 @@ BAD = "#b00020"
 PLACEHOLDER = "No sites are blocked. You are free to roam (carefully)."
 NO_LOADOUTS = "(no loadouts yet)"
 LOADOUTS_OFF = "(loadouts unavailable)"
+
+# Tk can only resize pictures by whole numbers, so the logo is drawn ahead of time at a few
+# sizes. display scaling (1.0 = 100%) -> file. tools/make_logo.ps1 makes them
+ASSETS = Path(__file__).parent / "assets"
+LOGO_FILES = {
+    1.0: "guardian_100.png",
+    1.25: "guardian_125.png",
+    1.5: "guardian_150.png",
+    2.0: "guardian_200.png",
+}
 
 # what the "For" box offers: label -> minutes (None = until you unblock it)
 DURATIONS = {
@@ -46,6 +57,21 @@ def formatremaining(seconds):
     if hours:
         return f"{hours}:{minutes:02}:{secs:02}"
     return f"{minutes}:{secs:02}"
+
+
+def logo_path(dpi):
+    """The logo file closest to the screen's scaling (96 dpi = 100%, 144 dpi = 150%)."""
+    scale = dpi / 96
+    closest = min(LOGO_FILES, key=lambda size: abs(size - scale))
+    return ASSETS / LOGO_FILES[closest]
+
+
+def load_logo(master):
+    """The logo as a Tk image, or None if it can't be loaded (it's only decoration)."""
+    try:
+        return tk.PhotoImage(master=master, file=str(logo_path(master.winfo_fpixels("1i"))))
+    except tk.TclError:
+        return None
 
 
 class XamGuardApp(ttk.Frame):
@@ -78,10 +104,24 @@ class XamGuardApp(ttk.Frame):
     # ---------- building the window ----------
 
     def _build(self):
-        ttk.Label(self, text="XamGuard", font=("Segoe UI", 22, "bold")).pack(anchor="w")
-        ttk.Label(self, text="Master your focus. Eliminate distractions.").pack(
-            anchor="w", pady=(0, 12)
+        # title and motto on the left, the logo in the top right corner
+        header = ttk.Frame(self)
+        header.pack(fill="x", pady=(0, 12))
+        header.columnconfigure(0, weight=1)  # the text column takes the spare width
+        header.rowconfigure(2, weight=1)  # and spare height goes below the text, not between
+        ttk.Label(header, text="XamGuard", font=("Segoe UI", 22, "bold")).grid(
+            row=0, column=0, sticky="w"
         )
+        ttk.Label(header, text="Master your focus. Eliminate distractions.").grid(
+            row=1, column=0, sticky="w"
+        )
+
+        # keep a reference on self, or Python throws the image away and Tk shows nothing
+        self.logo_image = load_logo(self)
+        self.logo_label = None
+        if self.logo_image is not None:
+            self.logo_label = ttk.Label(header, image=self.logo_image)
+            self.logo_label.grid(row=0, column=1, rowspan=3, sticky="ne", padx=(12, 0))
 
         if not self.admin_rights:
             self._build_admin_banner()

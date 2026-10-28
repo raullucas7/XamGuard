@@ -1,5 +1,7 @@
 """Window tests: a hidden window, a fake hosts file, buttons pressed from code."""
 
+import gc
+import struct
 import tkinter as tk
 
 import pytest
@@ -644,6 +646,92 @@ def test_closing_the_app_closes_the_editor_too(make_app):
     app.destroy()
 
     assert not editor.winfo_exists()
+
+
+# ---------- the logo ----------
+
+@pytest.mark.parametrize("dpi, filename", [
+    (96, "guardian_100.png"),  # 100% scaling
+    (120, "guardian_125.png"),  # 125%
+    (144, "guardian_150.png"),  # 150%
+    (192, "guardian_200.png"),  # 200%
+    (110, "guardian_125.png"),  # in between picks the closest
+    (72, "guardian_100.png"),  # smaller than anything we have
+    (300, "guardian_200.png"),  # bigger than anything we have
+])
+def test_logo_path_picks_the_size_for_the_screen(dpi, filename):
+    assert gui.logo_path(dpi).name == filename
+
+
+def png_info(path):
+    """(width, height, colour type) read straight from the png header."""
+    header = path.read_bytes()[:26]
+    assert header[:8] == b"\x89PNG\r\n\x1a\n"
+    width, height = struct.unpack(">II", header[16:24])
+    return width, height, header[25]
+
+
+@pytest.mark.parametrize("filename, height", [
+    ("guardian_100.png", 88),
+    ("guardian_125.png", 110),
+    ("guardian_150.png", 132),
+    ("guardian_200.png", 176),
+])
+def test_each_logo_file_is_a_transparent_png_at_its_size(filename, height):
+    width, real_height, colour_type = png_info(gui.ASSETS / filename)
+
+    assert real_height == height
+    assert width == height // 2  # the picture is twice as tall as it is wide
+    assert colour_type == 6  # RGBA, so it has transparency
+
+
+def test_every_file_the_window_can_ask_for_exists():
+    for name in gui.LOGO_FILES.values():
+        assert (gui.ASSETS / name).is_file()
+
+
+def test_the_logo_sits_in_the_top_right_of_the_header(make_app):
+    app = make_app()
+
+    assert app.logo_image.height() in (88, 110, 132, 176)
+    info = app.logo_label.grid_info()
+    assert (int(info["column"]), int(info["row"]), int(info["rowspan"])) == (1, 0, 3)
+    assert set(info["sticky"]) == {"n", "e"}
+
+
+def test_the_title_and_motto_stay_together_next_to_a_tall_logo(make_app):
+    """Old bug in the first version: the spare height was split between the two lines."""
+    app = make_app()
+    app.update()
+    title, motto = [w for w in app.logo_label.master.grid_slaves() if int(w.grid_info()["column"]) == 0][::-1]
+
+    gap = motto.winfo_y() - (title.winfo_y() + title.winfo_height())
+
+    assert gap < 10  # touching, not pushed apart
+
+
+def test_the_logo_is_really_showing_not_thrown_away(make_app):
+    app = make_app()
+
+    gc.collect()  # if nothing kept the image alive, Tk would blank the label here
+    app.update_idletasks()
+
+    assert app.logo_label.winfo_reqwidth() >= app.logo_image.width()
+    assert app.logo_label.winfo_reqheight() >= app.logo_image.height()
+
+
+@pytest.mark.parametrize("damage", ["missing", "corrupt"])
+def test_the_window_still_opens_without_a_usable_logo(make_app, monkeypatch, tmp_path, damage):
+    monkeypatch.setattr(gui, "ASSETS", tmp_path)  # an empty folder
+    if damage == "corrupt":
+        for name in gui.LOGO_FILES.values():
+            (tmp_path / name).write_bytes(b"this is not a png")
+
+    app = make_app()
+
+    assert app.logo_image is None
+    assert app.logo_label is None
+    assert shown(app) == [gui.PLACEHOLDER]  # everything else still works
 
 
 # ---------- without administrator rights ----------
