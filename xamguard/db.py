@@ -2,8 +2,9 @@
 
 import os
 import sqlite3
+import time
 
-from . import hostfileservice
+from . import appblocker, hostfileservice
 
 # init tables using IF NOT EXISTS to prevent crash on restart
 LOADOUTS = """
@@ -49,7 +50,16 @@ CREATE TABLE IF NOT EXISTS loadout_apps (
 );
 """
 
-SCHEMA = [LOADOUTS, SITES, APPS, LOADOUT_SITES, LOADOUT_APPS]
+# apps that are blocked right now. a loadout is the recipe, this is what's cooking.
+# until = unix time it ends, NULL = stays blocked until you unblock it
+APP_BLOCKS = """
+CREATE TABLE IF NOT EXISTS app_blocks (
+    process_name TEXT NOT NULL PRIMARY KEY,
+    until INTEGER
+);
+"""
+
+SCHEMA = [LOADOUTS, SITES, APPS, LOADOUT_SITES, LOADOUT_APPS, APP_BLOCKS]
 
 
 def default_path():
@@ -59,6 +69,14 @@ def default_path():
     )
     os.makedirs(folder, exist_ok=True)
     return os.path.join(folder, "xamguard.db")
+
+
+def stored_name(text):
+    """The name an app would be stored under. Doesn't complain, so you can always unblock."""
+    try:
+        return appblocker.normalizeapp(text)
+    except ValueError:
+        return text.strip().lower()
 
 
 class Database:
@@ -117,7 +135,7 @@ class Database:
         # check everything before touching the database
         cleaned = [hostfileservice.normalizedomain(site) for site in sites if site.strip()]
         sites = sorted(hostfileservice.plainsites(cleaned))
-        apps = sorted({app.strip().lower() for app in apps if app.strip()})
+        apps = sorted({appblocker.normalizeapp(app) for app in apps if app.strip()})
 
         try:
             with self.conn:  # one transaction: all of it happens, or none of it
@@ -167,6 +185,62 @@ class Database:
             ).rowcount
             self._drop_unused()
         return deleted > 0
+
+    # ---------- apps that are blocked right now ----------
+
+    def block_apps(self, names, until=None):
+        """Start blocking the apps. Returns the ones newly added.
+
+        until: unix time to unblock at, or None to stay blocked until you unblock it. An app
+        that's already blocked keeps its first end time. ValueError on a bad or protected
+        name, and then nothing is added.
+        """
+        names = sorted({appblocker.normalizeapp(name) for name in names if name.strip()})
+        ends = None if until is None else int(until)
+
+        added = []
+        with self.conn:
+            for name in names:
+                cursor = self.conn.execute(
+                    "INSERT OR IGNORE INTO app_blocks (process_name, until) VALUES (?, ?)",
+                    (name, ends),
+                )
+                if cursor.rowcount:  # 0 means it was already there and got ignored
+                    added.append(name)
+        return added
+
+    def app_blocks_until(self):
+        """{app: unblock time in unix seconds, or None if you have to unblock it}"""
+        rows = self.conn.execute(
+            "SELECT process_name, until FROM app_blocks ORDER BY process_name"
+        )
+        return dict(rows.fetchall())
+
+    def unblock_apps(self, names):
+        """Returns the ones that really were blocked. 'spotify' finds 'spotify.exe'."""
+        removed = []
+        with self.conn:
+            for name in sorted({stored_name(text) for text in names if text.strip()}):
+                cursor = self.conn.execute(
+                    "DELETE FROM app_blocks WHERE process_name = ?", (name,)
+                )
+                if cursor.rowcount:
+                    removed.append(name)
+        return removed
+
+    def unblock_expired_apps(self, now=None):
+        """Unblock the timed apps whose time is up. Returns their names."""
+        now = time.time() if now is None else now
+        with self.conn:
+            rows = self.conn.execute(
+                "SELECT process_name FROM app_blocks"
+                " WHERE until IS NOT NULL AND until <= ? ORDER BY process_name",
+                (now,),
+            ).fetchall()
+            self.conn.execute(
+                "DELETE FROM app_blocks WHERE until IS NOT NULL AND until <= ?", (now,)
+            )
+        return [name for (name,) in rows]
 
     def _drop_unused(self):
         # sites and apps are shared between loadouts, so only drop the ones nobody uses

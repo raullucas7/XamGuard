@@ -13,7 +13,7 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import messagebox, ttk
 
-from . import admin, hostfileservice
+from . import admin, appblocker, hostfileservice
 from .db import Database
 
 GOOD = "#1b5e20"
@@ -21,6 +21,8 @@ BAD = "#b00020"
 PLACEHOLDER = "No sites are blocked. You are free to roam (carefully)."
 NO_LOADOUTS = "(no loadouts yet)"
 LOADOUTS_OFF = "(loadouts unavailable)"
+APP_TAG = "[app]"  # marks an app in the list, so it isn't mistaken for a site
+SWEEP_MS = 2000  # how often blocked apps are looked for and closed
 
 # Tk can only resize pictures by whole numbers, so the logo is drawn ahead of time at a few
 # sizes. display scaling (1.0 = 100%) -> file. tools/make_logo.ps1 makes them
@@ -47,6 +49,11 @@ DURATIONS = {
 def splitinput(text):
     """'a.com, b.com c.com' -> ['a.com', 'b.com', 'c.com']"""
     return [piece for piece in re.split(r"[,\s]+", text) if piece]
+
+
+def splitapps(text):
+    """'spotify, steam' or one per line -> ['spotify', 'steam']. spaces stay, some names have them"""
+    return [piece.strip() for piece in re.split(r"[,\n]+", text) if piece.strip()]
 
 
 def formatremaining(seconds):
@@ -83,12 +90,16 @@ class XamGuardApp(ttk.Frame):
         self.clock = clock
         self.db = db  # None = loadouts are switched off (say the database wouldn't open)
         self.editor = None  # the "Edit loadouts" window while it's open
-        self.sites = []  # the Listbox just shows this list
+        self.sites = []  # the Listbox just shows these two lists
+        self.apps = []
         self.until = {}  # site -> when it gets unblocked (None = when you unblock it)
+        self.app_until = {}  # same for apps, kept in the database
         self._tick_job = None
+        self._sweep_job = None
 
         root.title("XamGuard")
         root.minsize(420, 640)
+        root.protocol("WM_DELETE_WINDOW", self.on_close)  # the X button
         self.pack(fill="both", expand=True)
 
         self.site_text = tk.StringVar()
@@ -99,7 +110,9 @@ class XamGuardApp(ttk.Frame):
         self.refresh_loadouts()
         if self.admin_rights:
             self.end_expired()  # timed blocks that ended while the app was closed
+        self.end_expired_apps()
         self._schedule_tick()
+        self._schedule_sweep()
 
     # ---------- building the window ----------
 
@@ -178,7 +191,8 @@ class XamGuardApp(ttk.Frame):
         listarea = ttk.Frame(self.listing)
         listarea.pack(fill="both", expand=True)
         self.listbox = tk.Listbox(
-            listarea, selectmode="extended", activestyle="none", font=("Segoe UI", 11)
+            listarea, selectmode="extended", activestyle="none", font=("Segoe UI", 11),
+            height=7,  # the default 10 rows made the window taller than a 1080p screen
         )
         scrollbar = ttk.Scrollbar(listarea, orient="vertical", command=self.listbox.yview)
         self.listbox.configure(yscrollcommand=scrollbar.set)
@@ -219,25 +233,39 @@ class XamGuardApp(ttk.Frame):
         self.status_label.configure(foreground=BAD if error else GOOD)
 
     def refresh(self):
-        """Reload the list from the hosts file."""
-        keep = self.selected_sites()
+        """Reload the list: sites from the hosts file, apps from the database."""
+        keep = self.selected_items()
         try:
             self.until = hostfileservice.list_blocked_until()
         except OSError as error:
             self.until = {}
             self.say(str(error), error=True)
 
+        self.app_until = {}
+        if self.db is not None:
+            try:
+                self.app_until = self.db.app_blocks_until()
+            except sqlite3.Error as error:
+                self.say(str(error), error=True)
+
         self.sites = sorted(self.until)
+        self.apps = sorted(self.app_until)
         self.draw_rows(keep)
-        self.listing.configure(text=f"Currently blocked ({len(self.sites)})")
+        self.listing.configure(text=f"Currently blocked ({len(self.sites) + len(self.apps)})")
+
+    def listed_items(self):
+        """Everything in the list, top to bottom: ('site', name) then ('app', name)."""
+        return [("site", site) for site in self.sites] + [("app", app) for app in self.apps]
 
     def draw_rows(self, keep=()):
-        """Show self.sites in the list, with the time left on timed ones.
+        """Show the sites and apps in the list, with the time left on timed ones.
 
-        keep: sites that should stay selected (redrawing would clear the selection).
+        keep: items (like ('site', 'a.com')) that should stay selected, since redrawing
+        would clear the selection.
         """
         now = self.clock()
-        rows = [self.rowtext(site, now) for site in self.sites] or [PLACEHOLDER]
+        items = self.listed_items()
+        rows = [self.rowtext(kind, name, now) for kind, name in items] or [PLACEHOLDER]
         if list(self.listbox.get(0, "end")) == rows:
             return  # nothing changed
 
@@ -245,25 +273,33 @@ class XamGuardApp(ttk.Frame):
         self.listbox.delete(0, "end")
         for row in rows:
             self.listbox.insert("end", row)
-        if not self.sites:
+        if not items:
             self.listbox.itemconfig(0, foreground="gray")
 
-        for index, site in enumerate(self.sites):
-            if site in keep:
+        for index, item in enumerate(items):
+            if item in keep:
                 self.listbox.selection_set(index)
         self.listbox.yview_moveto(top)
 
-    def rowtext(self, site, now):
-        until = self.until.get(site)
+    def rowtext(self, kind, name, now):
+        until = self.until.get(name) if kind == "site" else self.app_until.get(name)
+        label = name if kind == "site" else f"{name} {APP_TAG}"
         if until is None:
-            return site
+            return label
         if until <= now:
-            return f"{site}   (time's up)"
-        return f"{site}   ({formatremaining(until - now)} left)"
+            return f"{label}   (time's up)"
+        return f"{label}   ({formatremaining(until - now)} left)"
+
+    def selected_items(self):
+        # row numbers -> items. the placeholder row isn't in the list, so it's skipped
+        items = self.listed_items()
+        return [items[row] for row in self.listbox.curselection() if row < len(items)]
 
     def selected_sites(self):
-        # row numbers -> names. the placeholder row isn't in self.sites, so it's skipped
-        return [self.sites[row] for row in self.listbox.curselection() if row < len(self.sites)]
+        return [name for kind, name in self.selected_items() if kind == "site"]
+
+    def selected_apps(self):
+        return [name for kind, name in self.selected_items() if kind == "app"]
 
     # ---------- timed blocks ----------
 
@@ -274,7 +310,7 @@ class XamGuardApp(ttk.Frame):
                 until is not None and until <= self.clock() for until in self.until.values()
             ):
                 self.end_expired()
-            self.draw_rows(self.selected_sites())
+            self.draw_rows(self.selected_items())
         finally:
             self._schedule_tick()  # even if something failed, keep the clock going
 
@@ -290,16 +326,56 @@ class XamGuardApp(ttk.Frame):
             self.refresh()
             self.say("Time's up. Unblocked: " + ", ".join(done))
 
+    # ---------- blocked apps ----------
+
+    def sweep_apps(self):
+        """Runs every 2 seconds: ends app blocks that are up, closes blocked apps that are running."""
+        try:
+            self.end_expired_apps()
+            closed = self.close_blocked_apps()
+            if closed:
+                self.say("Closed: " + ", ".join(closed))
+        finally:
+            self._schedule_sweep()  # same as tick: keep going even if this round failed
+
+    def close_blocked_apps(self):
+        """Close every blocked app that's running right now. Returns the names it closed."""
+        if not self.app_until or not appblocker.available():
+            return []
+        return appblocker.sweep(self.app_until)
+
+    def end_expired_apps(self):
+        """Unblock timed apps whose time is up (this also catches ones that ended while closed)."""
+        if self.db is None:
+            return
+        try:
+            done = self.db.unblock_expired_apps(self.clock())
+        except sqlite3.Error as error:
+            self.say(str(error), error=True)
+            return
+
+        if done:
+            self.refresh()
+            self.say("Time's up. Unblocked: " + ", ".join(done))
+
     def _schedule_tick(self):
         if self._tick_job:
             self.after_cancel(self._tick_job)
         self._tick_job = self.after(1000, self.tick)
+
+    def _schedule_sweep(self):
+        if self._sweep_job:
+            self.after_cancel(self._sweep_job)
+        self._sweep_job = self.after(SWEEP_MS, self.sweep_apps)
 
     def destroy(self):
         # after() jobs belong to Tk, not to this frame, so they'd outlive it
         if self._tick_job:
             self.after_cancel(self._tick_job)
             self._tick_job = None
+        if self._sweep_job:
+            self.after_cancel(self._sweep_job)
+            self._sweep_job = None
         if self.editor is not None:
             try:
                 self.editor.destroy()  # it belongs to the root, not to this frame
@@ -318,7 +394,7 @@ class XamGuardApp(ttk.Frame):
             self.say("Type a site to block, like youtube.com.", error=True)
             return
 
-        self._block_sites(sites, clear_entry=True)
+        self._start_block(sites, clear_entry=True)
 
     def on_block_loadout(self):
         if not self._need_admin():
@@ -333,33 +409,55 @@ class XamGuardApp(ttk.Frame):
             self.say(str(error), error=True)
             return
 
-        if not loadout or not loadout["sites"]:
-            self.say("That loadout has no sites to block.", error=True)
+        if not loadout or not (loadout["sites"] or loadout["apps"]):
+            self.say("That loadout has no sites or apps to block.", error=True)
             return
-        self._block_sites(loadout["sites"], label=loadout["name"])
+        self._start_block(loadout["sites"], loadout["apps"], label=loadout["name"])
 
-    def _block_sites(self, sites, label=None, clear_entry=False):
-        """Block the sites for the time in the "For" box. label = the loadout's name, if any."""
+    def _start_block(self, sites, apps=(), label=None, clear_entry=False):
+        """Block the sites and apps for the time in the "For" box. label = the loadout's name."""
         minutes = DURATIONS[self.length_text.get()]
         until = None if minutes is None else self.clock() + minutes * 60
 
         try:
-            added = hostfileservice.block(sites, until=until)
+            added_sites = hostfileservice.block(sites, until=until) if sites else []
         except (ValueError, OSError) as error:
             self.say(str(error), error=True)
             return
 
+        # apps can't go in the hosts file, so they go in the database and the sweep closes them
+        added_apps, app_problem = [], None
+        if apps:
+            if self.db is None or not appblocker.available():
+                app_problem = "The apps weren't blocked: app blocking needs psutil (pip install psutil)."
+            else:
+                try:
+                    added_apps = self.db.block_apps(apps, until=until)
+                except (ValueError, sqlite3.Error) as error:
+                    app_problem = str(error)
+
         if clear_entry:
             self.site_text.set("")
         self.refresh()
+
+        added = hostfileservice.plainsites(added_sites) + [f"{app} {APP_TAG}" for app in added_apps]
         if added:
             length = "" if minutes is None else f" for {self.length_text.get()}"
             who = f"{label} loadout blocked" if label else "Blocked"
-            self.say(f"{who}{length}: " + ", ".join(hostfileservice.plainsites(added)))
+            text = f"{who}{length}: " + ", ".join(added)
+            if added_apps:
+                text += ". Apps are only closed while XamGuard is open."
+                closed = self.close_blocked_apps()  # don't wait for the next sweep
+                if closed:
+                    text += " Closed now: " + ", ".join(closed) + "."
         elif label:
-            self.say(f"Everything in {label} was already blocked.")
+            text = f"Everything in {label} was already blocked."
         else:
-            self.say("Those sites were already blocked.")
+            text = "Those sites were already blocked."
+
+        if app_problem:
+            text = f"{text} {app_problem}" if added else app_problem
+        self.say(text, error=bool(app_problem))
 
     def on_edit_loadouts(self):
         if self.db is None:
@@ -391,22 +489,40 @@ class XamGuardApp(ttk.Frame):
         if not self._need_admin():
             return
 
-        chosen = self.selected_sites()
-        if not chosen:
-            self.say("Select one or more sites in the list first.", error=True)
+        sites, apps = self.selected_sites(), self.selected_apps()
+        if not (sites or apps):
+            self.say("Select one or more sites or apps in the list first.", error=True)
             return
 
+        removed, removed_apps = [], []
         try:
-            removed = hostfileservice.unblock(chosen)
-        except (ValueError, OSError) as error:
+            if sites:
+                removed = hostfileservice.unblock(sites)
+            if apps and self.db is not None:
+                removed_apps = self.db.unblock_apps(apps)
+        except (ValueError, OSError, sqlite3.Error) as error:
             self.say(str(error), error=True)
             return
 
         self.refresh()
-        if removed:
-            self.say("Unblocked: " + ", ".join(hostfileservice.plainsites(removed)))
+        names = hostfileservice.plainsites(removed) + [f"{app} {APP_TAG}" for app in removed_apps]
+        if names:
+            self.say("Unblocked: " + ", ".join(names))
         else:
-            self.say("Those sites were no longer blocked.")
+            self.say("Those were no longer blocked.")
+
+    def on_close(self):
+        """The window's X button. Apps are only blocked while we're open, so ask first."""
+        now = self.clock()
+        active = [app for app, until in self.app_until.items() if until is None or until > now]
+        if active and not messagebox.askyesno(
+            "Close XamGuard?",
+            "Blocked apps are only closed while XamGuard is open.\n"
+            f"Still blocked: {', '.join(active)}\n\nClose it anyway?",
+            parent=self.root,
+        ):
+            return
+        self.root.destroy()
 
     def on_elevate(self):
         if admin.relaunch_as_admin():
@@ -430,10 +546,10 @@ class LoadoutEditor(tk.Toplevel):
         self.on_change = on_change  # called after a save or a delete
         self.names = []  # the Listbox just shows this list
         self.current = None  # name of the loadout being edited, None = a new one
-        self.apps = []  # kept as they are for now, so saving doesn't wipe them
+        self.picker = None  # the "running apps" window while it's open
 
         self.title("Edit loadouts")
-        self.minsize(540, 360)
+        self.minsize(560, 520)
         self.transient(parent)
         self.name_text = tk.StringVar()
         self.status_text = tk.StringVar()
@@ -462,8 +578,20 @@ class LoadoutEditor(tk.Toplevel):
         ttk.Label(right, text="Sites (separate with commas, spaces or new lines)").pack(
             anchor="w", pady=(10, 0)
         )
-        self.sites_box = tk.Text(right, height=10, width=30, font=("Segoe UI", 11), wrap="word")
+        self.sites_box = tk.Text(right, height=6, width=30, font=("Segoe UI", 11), wrap="word")
         self.sites_box.pack(fill="both", expand=True)
+
+        ttk.Label(right, text="Apps (one per line, or separated by commas)").pack(
+            anchor="w", pady=(10, 0)
+        )
+        self.apps_box = tk.Text(right, height=4, width=30, font=("Segoe UI", 11), wrap="word")
+        self.apps_box.pack(fill="both", expand=True)
+        self.pick_button = ttk.Button(
+            right, text="Pick from running apps...", command=self.on_pick_running
+        )
+        self.pick_button.pack(anchor="w", pady=(4, 0))
+        if not appblocker.available():
+            self.pick_button.state(["disabled"])  # it needs psutil to see what's running
 
         buttons = ttk.Frame(right)
         buttons.pack(fill="x", pady=(8, 0))
@@ -507,24 +635,26 @@ class LoadoutEditor(tk.Toplevel):
             return
 
         self.current = loadout["name"]
-        self.apps = loadout["apps"]
         self.name_text.set(loadout["name"])
         self.sites_box.delete("1.0", "end")
         self.sites_box.insert("1.0", "\n".join(loadout["sites"]))
+        self.apps_box.delete("1.0", "end")
+        self.apps_box.insert("1.0", "\n".join(loadout["apps"]))
         self.say("")
 
     def on_new(self):
         self.listbox.selection_clear(0, "end")
         self.current = None
-        self.apps = []
         self.name_text.set("")
         self.sites_box.delete("1.0", "end")
+        self.apps_box.delete("1.0", "end")
         self.name_entry.focus_set()
         self.say("")
 
     def on_save(self):
         name = self.name_text.get().strip()
         sites = splitinput(self.sites_box.get("1.0", "end"))
+        apps = splitapps(self.apps_box.get("1.0", "end"))
 
         try:
             # save_loadout replaces a loadout that already has this name. fine when editing,
@@ -532,7 +662,7 @@ class LoadoutEditor(tk.Toplevel):
             if self.current is None and self.db.get_loadout(name):
                 self.say(f"'{name}' already exists. Pick it in the list to edit it.", error=True)
                 return
-            saved = self.db.save_loadout(name, sites, apps=self.apps, old_name=self.current)
+            saved = self.db.save_loadout(name, sites, apps=apps, old_name=self.current)
         except (ValueError, sqlite3.Error) as error:
             self.say(str(error), error=True)
             return
@@ -561,9 +691,72 @@ class LoadoutEditor(tk.Toplevel):
         self.say(f"Deleted {gone}.")
         self._changed()
 
+    def on_pick_running(self):
+        if self.picker is not None and self.picker.winfo_exists():
+            self.picker.lift()  # already open
+            return
+        self.picker = AppPicker(self, on_add=self.add_apps)
+
+    def add_apps(self, names):
+        """Add apps to the Apps box, skipping ones that are already in there."""
+        current = splitapps(self.apps_box.get("1.0", "end"))
+        have = {name.lower() for name in current}
+        current += [name for name in names if name.lower() not in have]
+        self.apps_box.delete("1.0", "end")
+        self.apps_box.insert("1.0", "\n".join(current))
+
     def _changed(self):
         if self.on_change:
             self.on_change()
+
+
+class AppPicker(tk.Toplevel):
+    """A list of the apps running right now. Pick some, click Add."""
+
+    def __init__(self, parent, on_add):
+        super().__init__(parent)
+        self.on_add = on_add
+        self.names = []  # the Listbox just shows this list
+
+        self.title("Running apps")
+        self.minsize(300, 380)
+        self.transient(parent)
+
+        body = ttk.Frame(self, padding=12)
+        body.pack(fill="both", expand=True)
+        ttk.Label(body, text="Your running apps (Ctrl or Shift to pick several)").pack(anchor="w")
+
+        area = ttk.Frame(body)
+        area.pack(fill="both", expand=True, pady=(6, 0))
+        self.listbox = tk.Listbox(
+            area, selectmode="extended", exportselection=False, activestyle="none",
+            font=("Segoe UI", 11),
+        )
+        scrollbar = ttk.Scrollbar(area, orient="vertical", command=self.listbox.yview)
+        self.listbox.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side="right", fill="y")
+        self.listbox.pack(side="left", fill="both", expand=True)
+
+        buttons = ttk.Frame(body)
+        buttons.pack(fill="x", pady=(8, 0))
+        self.add_button = ttk.Button(buttons, text="Add selected", command=self.on_add_selected)
+        self.add_button.pack(side="left")
+        ttk.Button(buttons, text="Refresh", command=self.refresh).pack(side="left", padx=(8, 0))
+        ttk.Button(buttons, text="Close", command=self.destroy).pack(side="right")
+
+        self.refresh()
+
+    def refresh(self):
+        self.names = appblocker.running_apps()
+        self.listbox.delete(0, "end")
+        for name in self.names:
+            self.listbox.insert("end", name)
+
+    def on_add_selected(self):
+        chosen = [self.names[row] for row in self.listbox.curselection()]
+        if chosen:
+            self.on_add(chosen)
+        self.destroy()
 
 
 def show_unexpected_error(exc_type, exc, tb):

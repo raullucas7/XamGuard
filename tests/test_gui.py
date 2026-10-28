@@ -6,7 +6,7 @@ import tkinter as tk
 
 import pytest
 
-from xamguard import admin, db, gui, hostfileservice as h
+from xamguard import admin, appblocker, db, gui, hostfileservice as h
 
 
 @pytest.fixture
@@ -16,6 +16,28 @@ def hosts(tmp_path, monkeypatch):
     monkeypatch.setattr(h, "HOST_PATH", str(path))
     monkeypatch.setattr(h, "dnsflush", lambda: None)
     return path
+
+
+class SweepRecorder:
+    """Stands in for appblocker.sweep: remembers what it was asked to close, closes nothing."""
+
+    def __init__(self):
+        self.calls = []  # one entry per sweep: the names it was asked to close
+        self.closes = []  # what to pretend it closed
+
+    def __call__(self, blocked, *args, **kwargs):
+        self.calls.append(sorted(blocked))
+        return list(self.closes)
+
+
+@pytest.fixture(autouse=True)
+def sweeps(monkeypatch):
+    """Every window test runs with this. The window sweeps for blocked apps, and a test
+    must never close a real one (say, your actual Spotify), so sweeps go to a recorder."""
+    recorder = SweepRecorder()
+    monkeypatch.setattr(appblocker, "sweep", recorder)
+    monkeypatch.setattr(appblocker, "running_apps", lambda *args, **kwargs: [])
+    return recorder
 
 
 @pytest.fixture(scope="session")
@@ -732,6 +754,372 @@ def test_the_window_still_opens_without_a_usable_logo(make_app, monkeypatch, tmp
     assert app.logo_image is None
     assert app.logo_label is None
     assert shown(app) == [gui.PLACEHOLDER]  # everything else still works
+
+
+# ---------- apps: the main window ----------
+
+@pytest.mark.parametrize("text, expected", [
+    ("spotify, steam", ["spotify", "steam"]),
+    ("spotify\nsteam", ["spotify", "steam"]),
+    ("Origin Web Helper Service, steam", ["Origin Web Helper Service", "steam"]),  # spaces stay
+    (" a ,, b \n\n", ["a", "b"]),
+    ("", []),
+])
+def test_splitapps(text, expected):
+    assert gui.splitapps(text) == expected
+
+
+def test_blocking_a_loadout_with_apps_blocks_the_sites_and_records_the_apps(make_app, database, sweeps):
+    database.save_loadout("Study", ["a.com"], apps=["Spotify"])
+    app = make_app()
+
+    app.loadout_button.invoke()
+
+    assert h.list_blocked() == ["a.com"]
+    assert database.app_blocks_until() == {"spotify.exe": None}
+    assert shown(app) == ["a.com", "spotify.exe [app]"]
+    assert app.status_text.get() == (
+        "Study loadout blocked: a.com, spotify.exe [app]. Apps are only closed while XamGuard is open."
+    )
+    assert sweeps.calls == [["spotify.exe"]]  # swept right away, not 2 seconds later
+
+
+def test_apps_get_the_same_end_time_and_countdown_as_sites(make_app, database, clock):
+    database.save_loadout("Study", ["a.com"], apps=["spotify.exe"])
+    app = make_app()
+    app.length_text.set("25 minutes")
+
+    app.loadout_button.invoke()
+
+    assert database.app_blocks_until() == {"spotify.exe": clock.now + 25 * 60}
+    assert shown(app) == ["a.com   (25:00 left)", "spotify.exe [app]   (25:00 left)"]
+    assert "for 25 minutes" in app.status_text.get()
+
+
+def test_a_loadout_with_only_apps_leaves_the_hosts_file_alone(make_app, database, hosts):
+    before = hosts.read_text()
+    database.save_loadout("Games", [], apps=["steam.exe"])
+    app = make_app()
+
+    app.loadout_button.invoke()
+
+    assert database.app_blocks_until() == {"steam.exe": None}
+    assert hosts.read_text() == before
+    assert shown(app) == ["steam.exe [app]"]
+
+
+def test_apps_that_are_running_get_closed_right_away(make_app, database, sweeps):
+    database.save_loadout("Study", [], apps=["spotify.exe"])
+    sweeps.closes = ["spotify.exe"]
+    app = make_app()
+
+    app.loadout_button.invoke()
+
+    assert app.status_text.get().endswith("Closed now: spotify.exe.")
+
+
+def test_blocking_a_loadout_again_says_everything_was_already_blocked(make_app, database):
+    database.save_loadout("Study", ["a.com"], apps=["spotify.exe"])
+    app = make_app()
+    app.loadout_button.invoke()
+
+    app.loadout_button.invoke()
+
+    assert app.status_text.get() == "Everything in Study was already blocked."
+
+
+def test_without_psutil_the_sites_still_block_and_the_apps_are_not_recorded(make_app, database, monkeypatch):
+    monkeypatch.setattr(appblocker, "available", lambda: False)
+    database.save_loadout("Study", ["a.com"], apps=["spotify.exe"])
+    app = make_app()
+
+    app.loadout_button.invoke()
+
+    assert h.list_blocked() == ["a.com"]
+    assert database.app_blocks_until() == {}
+    assert "needs psutil" in app.status_text.get()
+
+
+def test_a_protected_app_in_a_loadout_is_refused_but_the_sites_still_block(make_app, database):
+    """Can only happen if the database was edited by hand: the window still says no."""
+    database.save_loadout("Study", ["a.com"])
+    database.conn.execute("INSERT INTO apps (process_name) VALUES ('explorer.exe')")
+    database.conn.execute(
+        "INSERT INTO loadout_apps SELECT loadouts.id, apps.id FROM loadouts, apps"
+        " WHERE loadouts.name = 'Study' AND apps.process_name = 'explorer.exe'"
+    )
+    database.conn.commit()
+    app = make_app()
+
+    app.loadout_button.invoke()
+
+    assert h.list_blocked() == ["a.com"]
+    assert database.app_blocks_until() == {}
+    assert "protected" in app.status_text.get()
+
+
+def test_the_title_counts_sites_and_apps_together(make_app, database):
+    h.block(["a.com", "b.com"])
+    database.block_apps(["spotify.exe"])
+    app = make_app()
+    assert app.listing.cget("text") == "Currently blocked (3)"
+
+
+# ---------- apps: the sweep ----------
+
+def test_the_sweep_closes_blocked_apps_and_says_so(make_app, database, sweeps):
+    database.block_apps(["spotify.exe", "steam.exe"])
+    app = make_app()
+    sweeps.closes = ["spotify.exe"]
+
+    app.sweep_apps()
+
+    assert sweeps.calls == [["spotify.exe", "steam.exe"]]
+    assert app.status_text.get() == "Closed: spotify.exe"
+
+
+def test_the_sweep_does_not_even_look_when_no_apps_are_blocked(make_app, sweeps):
+    app = make_app()
+    app.sweep_apps()
+    assert sweeps.calls == []
+
+
+def test_the_sweep_stops_looking_for_an_app_once_its_time_is_up(make_app, database, sweeps, clock):
+    database.block_apps(["a.exe"], until=clock.now + 60)
+    database.block_apps(["b.exe"])
+    app = make_app()
+
+    clock.advance(60)  # exactly the end
+    app.sweep_apps()
+
+    assert sweeps.calls == [["b.exe"]]
+    assert database.app_blocks_until() == {"b.exe": None}
+    assert shown(app) == ["b.exe [app]"]
+    assert app.status_text.get() == "Time's up. Unblocked: a.exe"
+
+
+def test_app_blocks_that_ended_while_the_app_was_closed_are_cleared_at_startup(make_app, database, clock):
+    database.block_apps(["old.exe"], until=clock.now - 10)
+    database.block_apps(["keep.exe"])
+
+    app = make_app()
+
+    assert shown(app) == ["keep.exe [app]"]
+    assert "Time's up" in app.status_text.get()
+
+
+def test_app_blocks_that_have_not_ended_resume_after_a_restart(make_app, database, clock):
+    database.block_apps(["a.exe"], until=clock.now + 600)
+    app = make_app()  # "restart"
+    assert shown(app) == ["a.exe [app]   (10:00 left)"]
+
+
+def test_the_sweep_works_without_admin_rights(make_app, database, sweeps):
+    database.block_apps(["a.exe"])  # closing your own programs doesn't need admin
+    app = make_app(admin_rights=False)
+
+    app.sweep_apps()
+
+    assert sweeps.calls == [["a.exe"]]
+
+
+def test_the_sweep_does_nothing_if_psutil_is_missing(make_app, database, sweeps, monkeypatch):
+    database.block_apps(["a.exe"])
+    app = make_app()
+    monkeypatch.setattr(appblocker, "available", lambda: False)
+
+    app.sweep_apps()
+
+    assert sweeps.calls == []
+
+
+def test_the_sweep_is_scheduled_and_cancelled_with_the_frame(make_app, tk_root):
+    app = make_app()
+    job = app._sweep_job
+
+    def pending():
+        return tk_root.tk.splitlist(tk_root.tk.call("after", "info"))
+
+    assert job in pending()
+    app.destroy()
+    assert job not in pending()
+
+
+# ---------- apps: the list and unblocking ----------
+
+def test_unblock_selected_removes_an_app(make_app, database):
+    h.block(["a.com"])
+    database.block_apps(["spotify.exe", "steam.exe"])
+    app = make_app()
+    app.listbox.selection_set(1)  # rows: a.com, spotify.exe, steam.exe
+
+    app.unblock_button.invoke()
+
+    assert database.app_blocks_until() == {"steam.exe": None}
+    assert h.list_blocked() == ["a.com"]
+    assert app.status_text.get() == "Unblocked: spotify.exe [app]"
+
+
+def test_unblock_selected_can_remove_a_site_and_an_app_together(make_app, database):
+    h.block(["a.com"])
+    database.block_apps(["spotify.exe"])
+    app = make_app()
+    app.listbox.selection_set(0, 1)
+
+    app.unblock_button.invoke()
+
+    assert h.list_blocked() == []
+    assert database.app_blocks_until() == {}
+    assert app.status_text.get() == "Unblocked: a.com, spotify.exe [app]"
+
+
+def test_tick_keeps_a_selected_app_row(make_app, database, clock):
+    database.block_apps(["a.exe", "b.exe"], until=clock.now + 600)
+    app = make_app()
+    app.listbox.selection_set(1)  # b.exe
+
+    clock.advance(1)
+    app.tick()
+
+    assert app.selected_apps() == ["b.exe"]
+    assert app.selected_sites() == []
+
+
+# ---------- apps: the close button ----------
+
+def ask_back(monkeypatch, reply):
+    """Replace the 'are you sure?' popup. Returns the list of messages it was asked."""
+    asked = []
+
+    def fake(title, message, **kwargs):
+        asked.append(message)
+        return reply
+
+    monkeypatch.setattr(gui.messagebox, "askyesno", fake)
+    return asked
+
+
+def test_closing_while_apps_are_blocked_asks_first(make_app, database, monkeypatch):
+    database.block_apps(["spotify.exe"])
+    app = make_app()
+    closed = []
+    monkeypatch.setattr(app.root, "destroy", lambda: closed.append(True))
+
+    asked = ask_back(monkeypatch, reply=False)
+    app.on_close()
+    assert closed == []  # said no, stays open
+    assert "spotify.exe" in asked[0]
+
+    ask_back(monkeypatch, reply=True)
+    app.on_close()
+    assert closed == [True]
+
+
+def test_closing_with_no_apps_blocked_just_closes(make_app, monkeypatch):
+    app = make_app()
+    closed = []
+    monkeypatch.setattr(app.root, "destroy", lambda: closed.append(True))
+    asked = ask_back(monkeypatch, reply=False)
+
+    app.on_close()
+
+    assert closed == [True]
+    assert asked == []  # nothing to warn about
+
+
+def test_closing_does_not_ask_about_app_blocks_that_already_ended(make_app, database, clock, monkeypatch):
+    database.block_apps(["a.exe"], until=clock.now + 5)
+    app = make_app()
+    clock.advance(10)  # over, but nobody has swept yet
+    closed = []
+    monkeypatch.setattr(app.root, "destroy", lambda: closed.append(True))
+    asked = ask_back(monkeypatch, reply=False)
+
+    app.on_close()
+
+    assert closed == [True] and asked == []
+
+
+# ---------- apps: the editor ----------
+
+def test_picking_a_loadout_shows_its_apps(make_app, database):
+    database.save_loadout("Study", ["a.com"], apps=["steam.exe", "spotify.exe"])
+    editor = open_editor(make_app())
+
+    editor.listbox.selection_set(0)
+    editor.on_pick()
+
+    assert editor.apps_box.get("1.0", "end").split() == ["spotify.exe", "steam.exe"]
+
+
+def test_saving_apps_cleans_them_and_keeps_names_with_spaces(make_app, database):
+    editor = open_editor(make_app())
+    editor.name_text.set("Study")
+    type_sites(editor, "a.com")
+    editor.apps_box.insert("1.0", "Spotify, Origin Web Helper Service\nSTEAM.exe")
+
+    editor.save_button.invoke()
+
+    assert database.get_loadout("Study")["apps"] == [
+        "origin web helper service.exe",
+        "spotify.exe",
+        "steam.exe",
+    ]
+
+
+def test_a_protected_app_shows_an_error_and_saves_nothing(make_app, database):
+    editor = open_editor(make_app())
+    editor.name_text.set("Study")
+    editor.apps_box.insert("1.0", "spotify\nexplorer")
+
+    editor.save_button.invoke()
+
+    assert "protected" in editor.status_text.get()
+    assert database.loadout_names() == []
+
+
+def test_new_also_clears_the_apps_box(make_app, database):
+    database.save_loadout("Study", [], apps=["steam.exe"])
+    editor = open_editor(make_app())
+    editor.listbox.selection_set(0)
+    editor.on_pick()
+
+    editor.on_new()
+
+    assert editor.apps_box.get("1.0", "end").strip() == ""
+
+
+def test_the_picker_lists_running_apps_and_adds_the_chosen_ones(make_app, monkeypatch):
+    monkeypatch.setattr(appblocker, "running_apps", lambda *a, **k: ["discord.exe", "spotify.exe", "steam.exe"])
+    editor = open_editor(make_app())
+    editor.apps_box.insert("1.0", "steam.exe")
+
+    editor.pick_button.invoke()
+    picker = editor.picker
+    assert list(picker.listbox.get(0, "end")) == ["discord.exe", "spotify.exe", "steam.exe"]
+
+    picker.listbox.selection_set(0)
+    picker.listbox.selection_set(2)  # discord and steam (steam is already in the box)
+    picker.add_button.invoke()
+
+    assert editor.apps_box.get("1.0", "end").split() == ["steam.exe", "discord.exe"]  # no duplicate
+    assert not picker.winfo_exists()  # it closes itself after adding
+
+
+def test_the_picker_only_opens_once(make_app):
+    editor = open_editor(make_app())
+    editor.pick_button.invoke()
+    first = editor.picker
+
+    editor.pick_button.invoke()
+
+    assert editor.picker is first
+
+
+def test_the_picker_button_is_off_without_psutil(make_app, monkeypatch):
+    monkeypatch.setattr(appblocker, "available", lambda: False)
+    editor = open_editor(make_app())
+    assert editor.pick_button.instate(["disabled"])
 
 
 # ---------- without administrator rights ----------
